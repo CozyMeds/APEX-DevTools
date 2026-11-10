@@ -31,7 +31,16 @@ try {
             $process = Start-Process $gui -PassThru
             try {
                 if (!$process.WaitForInputIdle(15000) -or $process.HasExited) { throw "$package GUI failed to start." }
-                $null = $process.CloseMainWindow()
+                # WinForms may become input-idle before Application.Run has shown the main form.
+                $deadline = [DateTime]::UtcNow.AddSeconds(10)
+                do {
+                    $process.Refresh()
+                    if ($process.HasExited) { throw "$package GUI exited before showing its window." }
+                    if ($process.MainWindowHandle -ne [IntPtr]::Zero) { break }
+                    Start-Sleep -Milliseconds 100
+                } while ([DateTime]::UtcNow -lt $deadline)
+                if ($process.MainWindowHandle -eq [IntPtr]::Zero) { throw "$package GUI did not show a main window." }
+                if (!$process.CloseMainWindow()) { throw "$package GUI main window did not accept a close request." }
                 if (!$process.WaitForExit(10000)) { throw "$package GUI did not close." }
                 if ($process.ExitCode -ne 0) { throw "$package GUI exited with an error." }
             } finally {

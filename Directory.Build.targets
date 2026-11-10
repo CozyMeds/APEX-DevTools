@@ -1,0 +1,6 @@
+<Project>
+  <!-- Explicit on every host so locked restore does not depend on installed targeting packs. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+</Project>

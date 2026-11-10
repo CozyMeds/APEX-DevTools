@@ -70,7 +70,9 @@ Windows builds update Microsoft Defender security intelligence and scan the runt
 archives before package smoke tests and upload. Scan logs, engine/definition versions,
 SHA-256 file hashes and Authenticode status are included in the CI artifacts. An
 unavailable engine, stale definitions, detection, scan error or changed payload fails
-the scan step. Unsigned binaries are reported as unsigned; signing is not fabricated.
+the scan step. Runtime ZIPs are uploaded only after all checks pass; failed builds
+retain validation reports separately. Unsigned binaries are reported as unsigned;
+signing is not fabricated.
 
 `Scan reported downloads` verifies an existing Actions artifact against a supplied
 SHA-256, then scans archives and extracted payloads without executing them. It also

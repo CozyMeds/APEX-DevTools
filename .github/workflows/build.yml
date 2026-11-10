@@ -37,8 +37,8 @@ jobs:
       - name: Smoke-test extracted archives
         shell: pwsh
         run: ./scripts/smoke-test-packages.ps1
-      - name: Upload packages and test reports
-        if: always()
+      - name: Upload verified packages and test reports
+        if: success()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: apex-build
@@ -48,4 +48,14 @@ jobs:
             artifacts/SHA256SUMS.txt
             artifacts/gui-preview/*.png
             tests/**/TestResults/*.trx
+            artifacts/antivirus/*
+      - name: Preserve validation reports when a check fails
+        if: failure()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: apex-validation-reports
+          if-no-files-found: warn
+          path: |
+            tests/**/TestResults/*.trx
+            artifacts/gui-preview/*.png
             artifacts/antivirus/*

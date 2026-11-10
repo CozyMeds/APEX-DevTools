@@ -5,7 +5,7 @@ A PlayStation 4 Black Ops III GSC compilation toolkit with a standalone CLI and 
 Designed for **PS4 BO3 1.33**. Runtime applications target **.NET Framework 4.8**.
 The compiler core also targets .NET Standard 2.0 for testing and reuse.
 
-![APEX Compiler GUI](assets/apex-compiler-gui.png?v=2)
+![APEX Compiler GUI](assets/apex-compiler-gui.png?v=3)
 
 The GUI uses a two-column compiler workspace with live build output, severity filters,
 check-only mode and an output artifact summary.

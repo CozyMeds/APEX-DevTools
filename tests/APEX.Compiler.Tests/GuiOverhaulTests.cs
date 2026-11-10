@@ -128,6 +128,7 @@ namespace ApexCompiler.Tests
                     Assert.True(configuration.ClientRectangle.Contains(buttonBounds), "Compile action must remain reachable at minimum window size.");
                     AssertResultTextVisible(form);
                     AssertActionVisible(form, "btnCancel");
+                    foreach (string name in new[] { "txtCompiler", "txtSource", "txtOutput" }) AssertControlVisible(form, name);
                     Capture(form, "gui-minimum.png");
                 });
             }
@@ -241,9 +242,13 @@ namespace ApexCompiler.Tests
         }
         private static void AssertActionVisible(MainForm form, string name)
         {
-            var button = Field<Button>(form, name);
-            var screen = button.RectangleToScreen(button.ClientRectangle);
-            for (Control parent = button.Parent; parent != null; parent = parent.Parent)
+            AssertControlVisible(form, name);
+        }
+        private static void AssertControlVisible(MainForm form, string name)
+        {
+            var control = Field<Control>(form, name);
+            var screen = control.RectangleToScreen(control.ClientRectangle);
+            for (Control parent = control.Parent; parent != null; parent = parent.Parent)
                 Assert.True(parent.RectangleToScreen(parent.ClientRectangle).Contains(screen), name + " must remain visible without scrolling.");
         }
 

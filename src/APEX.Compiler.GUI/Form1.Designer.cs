@@ -128,7 +128,7 @@ namespace APEX.Compiler.GUI
             btnBrowseCompiler = Button("btnBrowseCompiler", "", Glyph.Folder, btnBrowseCompiler_Click, "Browse for compiler executable");
             btnBrowseSource = Button("btnBrowseSource", "", Glyph.Folder, btnBrowseSource_Click, "Browse for source directory");
             btnBrowseOutput = Button("btnBrowseOutput", "", Glyph.Folder, btnBrowseOutput_Click, "Choose GSCC output file");
-            var sourceViewport = new Panel { Name = "sourceViewport", Dock = DockStyle.Fill, AutoScroll = true, BackColor = Theme.Surface, Margin = new Padding(0), AutoScrollMinSize = Size.Empty };
+            var sourceViewport = new Panel { Name = "sourceViewport", Dock = DockStyle.Fill, AutoScroll = false, BackColor = Theme.Surface, Margin = new Padding(0), AutoScrollMinSize = Size.Empty };
             var fields = Grid(1, 3); fields.Dock = DockStyle.Top; fields.Height = 314;
             fields.RowStyles.Add(new RowStyle(SizeType.Absolute, 94));
             fields.RowStyles.Add(new RowStyle(SizeType.Absolute, 110));

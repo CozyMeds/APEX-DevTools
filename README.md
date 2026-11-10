@@ -5,9 +5,10 @@ A PlayStation 4 Black Ops III GSC compilation toolkit with a standalone CLI and 
 Designed for **PS4 BO3 1.33**. Runtime applications target **.NET Framework 4.8**.
 The compiler core also targets .NET Standard 2.0 for testing and reuse.
 
-![APEX Compiler GUI](assets/apex-compiler-gui.png?v=2)
+![APEX Compiler GUI](assets/apex-compiler-gui.png?v=3)
 
-The screenshot shows the earlier GUI; the current build also has a Cancel button.
+The GUI uses a two-column compiler workspace with live build output, severity filters,
+check-only mode and an output artifact summary.
 
 ## Download and installation
 
@@ -28,6 +29,16 @@ In the bundle, launch `APEX.Compiler.GUI.exe`, select a source directory, choose
 `APEX.Compiler.exe`, or uses a configured compiler location. **CANCEL** stops the
 current compiler process. Builds time out after two minutes; closing the window
 also cancels an active build before exiting.
+
+Use **Check only** to compile and validate without selecting an output file or writing
+a build. **All**, **Warnings** and **Errors** filter the captured messages without
+discarding their history. The result banner displays the real duration, output size
+and warning count. The output card shows the selected file and opens it in Explorer.
+
+Keyboard shortcuts: **F5** compiles, **Shift+F5** checks, **Esc** cancels an active
+build and **Ctrl+L** clears an idle build log. Paths remain visible in tooltips and
+are saved between sessions. Standard Windows resizing and snapping are retained;
+the layout supports DPI scaling and keeps the build actions reachable at its minimum size.
 
 ## Command-line usage
 

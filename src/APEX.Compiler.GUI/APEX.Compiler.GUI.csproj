@@ -3,6 +3,7 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net48</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
     <AssemblyName>APEX.Compiler.GUI</AssemblyName>
     <RootNamespace>APEX.Compiler.GUI</RootNamespace>
     <GenerateAssemblyInfo>true</GenerateAssemblyInfo>

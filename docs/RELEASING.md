@@ -13,7 +13,11 @@ Do not edit generated resources or settings files to change the product version.
 Windows CI restores in locked mode, builds with warnings treated as errors, runs
 the net48 and net10.0 regression suites, packages all three distributions and tests
 the extracted archives. Package smoke tests compile the bundled sample and verify
-GUI startup/shutdown. They do not verify PS4 execution or every interactive GUI flow.
+GUI startup/shutdown. Native GUI tests also exercise real compilation, check-only
+mode, severity filters, output metadata, cancellation, failed-output preservation and
+the minimum window size. They capture client-area previews in `artifacts/gui-preview/`,
+which CI uploads with the test reports. They do not verify PS4 execution or every
+interactive GUI flow.
 
 Before tagging a release, verify GUI cancellation, timeout/close behavior, existing
 output preservation, paths containing spaces/trailing separators, Windows scaling

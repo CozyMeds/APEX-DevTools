@@ -42,4 +42,5 @@ jobs:
           path: |
             artifacts/*.zip
             artifacts/SHA256SUMS.txt
+            artifacts/gui-preview/*.png
             tests/**/TestResults/*.trx

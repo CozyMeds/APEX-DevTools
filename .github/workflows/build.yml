@@ -28,11 +28,15 @@ jobs:
         run: dotnet test tests/APEX.Compiler.Tests/APEX.Compiler.Tests.csproj -c Release -f net48 --no-build --no-restore --logger "trx;LogFileName=net48.trx"
       - name: Test the portable compiler core
         run: dotnet test tests/APEX.Compiler.Tests/APEX.Compiler.Tests.csproj -c Release -f net10.0 --no-build --no-restore --logger "trx;LogFileName=net10.trx"
-      - name: Package and smoke-test extracted archives
+      - name: Package runtime archives
         shell: pwsh
-        run: |
-          ./scripts/package.ps1
-          ./scripts/smoke-test-packages.ps1
+        run: ./scripts/package.ps1
+      - name: Scan packages with current Microsoft Defender definitions
+        shell: pwsh
+        run: ./scripts/scan-release.ps1 -Path artifacts -ReportDirectory artifacts/antivirus
+      - name: Smoke-test extracted archives
+        shell: pwsh
+        run: ./scripts/smoke-test-packages.ps1
       - name: Upload packages and test reports
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
@@ -44,3 +48,4 @@ jobs:
             artifacts/SHA256SUMS.txt
             artifacts/gui-preview/*.png
             tests/**/TestResults/*.trx
+            artifacts/antivirus/*

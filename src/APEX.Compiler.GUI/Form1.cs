@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Data;
@@ -9,14 +9,25 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using System.Diagnostics;
 using System.IO;
+using System.Threading;
+using ApexCompiler.Core;
 
 namespace APEX.Compiler.GUI
 {
     public partial class MainForm : Form
     {
+        private CancellationTokenSource buildCancellation;
+        private bool closeAfterBuild;
+        private readonly Queue<KeyValuePair<string, Color>> pendingLogs = new Queue<KeyValuePair<string, Color>>();
+        private readonly System.Windows.Forms.Timer logTimer;
+
         public MainForm()
         {
             InitializeComponent();
+            lblVersion.Text = "APEX COMPILER  ·  v" + typeof(MainForm).Assembly.GetName().Version.ToString(3);
+            logTimer = new System.Windows.Forms.Timer(components) { Interval = 50 };
+            logTimer.Tick += (sender, args) => DrainLogs();
+            logTimer.Start();
 
             UpdateStatus("Ready", Color.FromArgb(88, 214, 154));
 
@@ -109,170 +120,131 @@ namespace APEX.Compiler.GUI
 
         private async void btnCompile_Click(object sender, EventArgs e)
         {
-            // Prefer a configured compiler, with portable sibling-EXE detection.
-            string compilerPath = ResolveCompilerPath();
-
-            string sourcePath = txtSource.Text.Trim();
-            string outputPath = txtOutput.Text.Trim();
-
-            // Check the paths before compiling.
-            if (!File.Exists(compilerPath))
-            {
-                MessageBox.Show("Compiler executable not found.");
-                return;
-            }
-
-            if (!Directory.Exists(sourcePath) && !File.Exists(sourcePath))
-            {
-                UpdateStatus("Invalid source", Color.FromArgb(240, 91, 91));
-                MessageBox.Show("Please select a valid source directory.");
-                return;
-            }
-
-            if (string.IsNullOrWhiteSpace(outputPath) ||
-                !outputPath.EndsWith(".gscc", StringComparison.OrdinalIgnoreCase))
-            {
-                MessageBox.Show("Please select a .gscc output file.");
-                return;
-            }
-
-            string outputDirectory = Path.GetDirectoryName(outputPath);
-
-            string tempOutputPath = Path.Combine(
-                outputDirectory,
-                "APEX_" + Guid.NewGuid().ToString("N") + ".gscc"
-            );
-
-            // Prevent multiple compilations simultaneously.
-            btnCompile.Enabled = false;
-            UpdateStatus("Compiling...", Color.FromArgb(0, 191, 255));
-            rtbLog.Clear();
-            Stopwatch buildTimer = Stopwatch.StartNew();
-
+            string temporary = null;
+            var timer = Stopwatch.StartNew();
             try
             {
-                ProcessStartInfo startInfo = new ProcessStartInfo
+                string compiler = Path.GetFullPath(ResolveCompilerPath());
+                string source = Path.GetFullPath(txtSource.Text.Trim());
+                string output = Path.GetFullPath(txtOutput.Text.Trim());
+                if (!File.Exists(compiler)) throw new FileNotFoundException("Select a compiler executable.");
+                if (!Directory.Exists(source) && !File.Exists(source)) throw new FileNotFoundException("Select a valid source directory or file.");
+                if (!output.EndsWith(".gscc", StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("Select a .gscc output file.");
+                string directory = Path.GetDirectoryName(output);
+                Directory.CreateDirectory(directory);
+                temporary = Path.Combine(directory, "APEX_" + Guid.NewGuid().ToString("N") + ".gscc");
+                SetBuilding(true);
+                rtbLog.Clear();
+                UpdateStatus("Compiling...", Color.DeepSkyBlue);
+                using (var cancellation = new CancellationTokenSource(TimeSpan.FromMinutes(2)))
+                using (var process = new Process())
                 {
-                    FileName = compilerPath,
-                    Arguments = "\"" + sourcePath + "\" \"" + tempOutputPath + "\"",
-                    WorkingDirectory = Path.GetDirectoryName(compilerPath),
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true
-                };
-
-                using (Process process = new Process())
-                {
-                    process.StartInfo = startInfo;
-
-                    process.OutputDataReceived += (s, args) =>
+                    buildCancellation = cancellation;
+                    process.StartInfo = new ProcessStartInfo
                     {
-                        if (args.Data != null)
-                            AppendLog(args.Data, Color.FromArgb(86, 216, 255));
+                        FileName = compiler,
+                        Arguments = WindowsArguments.Quote(source) + " " + WindowsArguments.Quote(temporary),
+                        WorkingDirectory = Path.GetDirectoryName(compiler),
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true
                     };
-
-                    process.ErrorDataReceived += (s, args) =>
-                    {
-                        if (args.Data != null)
-                            AppendLog("ERROR: " + args.Data, Color.FromArgb(240, 91, 91));
-                    };
-
+                    process.OutputDataReceived += (s, args) => { if (args.Data != null) QueueLog(args.Data, Color.FromArgb(86, 216, 255)); };
+                    process.ErrorDataReceived += (s, args) => { if (args.Data != null) QueueLog(args.Data, Color.FromArgb(240, 91, 91)); };
                     process.Start();
                     process.BeginOutputReadLine();
                     process.BeginErrorReadLine();
-
-                    await Task.Run(() => process.WaitForExit());
-
-                    if (process.ExitCode == 0 && File.Exists(tempOutputPath) && new FileInfo(tempOutputPath).Length > 4)
+                    using (cancellation.Token.Register(() =>
                     {
-                        // Replace an existing build, retaining the old
-                        // file if replacement fails.
-                        if (File.Exists(outputPath))
-                        {
-                            File.Replace(tempOutputPath, outputPath, null);
-                        }
-                        else
-                        {
-                            File.Move(tempOutputPath, outputPath);
-                        }
-
-                        buildTimer.Stop();
-                        long outputBytes = new FileInfo(outputPath).Length;
-                        string elapsed = buildTimer.Elapsed.TotalSeconds.ToString("0.00") + "s";
-
-                        UpdateStatus("Build successful · " + elapsed, Color.FromArgb(88, 214, 154));
-                        AppendLog("Final output: " + outputPath, Color.FromArgb(86, 216, 255));
-                        AppendLog("Output size: " + outputBytes.ToString("N0") + " bytes");
-                        AppendLog("Total build time: " + elapsed);
-                        AppendLog(
-                            "GSCC compiled and verified successfully.",
-                            Color.FromArgb(0, 255, 0)
-                        );
-                    }
-                    else
+                        try { if (!process.HasExited) process.Kill(); }
+                        catch (InvalidOperationException) { }
+                        catch (Win32Exception ex) { QueueLog("Could not stop the compiler: " + ex.Message, Color.Orange); }
+                    }))
                     {
-                        buildTimer.Stop();
-                        string elapsed = buildTimer.Elapsed.TotalSeconds.ToString("0.00") + "s";
-                        UpdateStatus("Build failed · " + elapsed, Color.FromArgb(240, 91, 91));
-
-                        AppendLog(
-                            "Compilation failed. Previous GSCC preserved.",
-                            Color.FromArgb(240, 91, 91)
-                        );
+                        await Task.Run(() => process.WaitForExit());
                     }
+                    DrainLogs();
+                    cancellation.Token.ThrowIfCancellationRequested();
+                    if (process.ExitCode != 0) throw new InvalidOperationException("Compiler exited with code " + process.ExitCode + ". Previous GSCC preserved.");
+                    AtomicOutput.Promote(temporary, output);
+                    long bytes = new FileInfo(output).Length;
+                    UpdateStatus("Build successful · " + timer.Elapsed.TotalSeconds.ToString("0.00") + "s", Color.FromArgb(88, 214, 154));
+                    AppendLog("Final output: " + output);
+                    AppendLog("Output size: " + bytes.ToString("N0") + " bytes");
+                    AppendLog("PS4 BO3 header, sections and references validated.", Color.FromArgb(88, 214, 154));
                 }
+            }
+            catch (OperationCanceledException)
+            {
+                UpdateStatus("Build cancelled or timed out", Color.Orange);
+                AppendLog("Build cancelled or exceeded the two-minute limit. Previous GSCC preserved.", Color.Orange);
             }
             catch (Exception ex)
             {
-                buildTimer.Stop();
-                UpdateStatus("Build error · " + buildTimer.Elapsed.TotalSeconds.ToString("0.00") + "s",
-                    Color.FromArgb(240, 91, 91));
+                UpdateStatus("Build failed", Color.FromArgb(240, 91, 91));
                 AppendLog("ERROR: " + ex.Message, Color.FromArgb(240, 91, 91));
             }
-
             finally
             {
-                buildTimer.Stop();
-                if (File.Exists(tempOutputPath))
+                buildCancellation = null;
+                timer.Stop();
+                if (temporary != null && File.Exists(temporary))
                 {
-                    try
-                    {
-                        File.Delete(tempOutputPath);
-                    }
-                    catch (IOException)
-                    {
-                        AppendLog("WARNING: Could not remove temporary build file.");
-                    }
-                    catch (UnauthorizedAccessException)
-                    {
-                        AppendLog("WARNING: Access denied removing temporary build file.");
-                    }
+                    try { File.Delete(temporary); }
+                    catch (IOException ex) { AppendLog("Could not remove temporary output: " + ex.Message); }
+                    catch (UnauthorizedAccessException ex) { AppendLog("Could not remove temporary output: " + ex.Message); }
                 }
-
-                btnCompile.Enabled = true;
+                SetBuilding(false);
+                if (closeAfterBuild) Close();
             }
         }
 
-        // Writes compiler messages to the build console.
+        private void SetBuilding(bool building)
+        {
+            btnCompile.Enabled = !building;
+            btnCancel.Enabled = building;
+            btnBrowseSource.Enabled = !building;
+            btnBrowseOutput.Enabled = !building;
+            btnBrowseCompiler.Enabled = !building;
+        }
+
+        private void btnCancel_Click(object sender, EventArgs e) => buildCancellation?.Cancel();
+
+        private void QueueLog(string message, Color color)
+        {
+            lock (pendingLogs)
+            {
+                if (pendingLogs.Count >= 1000) return;
+                pendingLogs.Enqueue(new KeyValuePair<string, Color>(message.Length > 4096 ? message.Substring(0, 4096) + "…" : message, color));
+            }
+        }
+
+        private void DrainLogs()
+        {
+            for (int i = 0; i < 1000; i++)
+            {
+                KeyValuePair<string, Color> entry;
+                lock (pendingLogs)
+                {
+                    if (pendingLogs.Count == 0) return;
+                    entry = pendingLogs.Dequeue();
+                }
+                AppendLog(entry.Key, entry.Value);
+            }
+        }
+
         private void AppendLog(string message, Color? color = null)
         {
-            if (rtbLog.IsDisposed)
-                return;
-
-            if (rtbLog.InvokeRequired)
+            if (rtbLog.IsDisposed) return;
+            if (rtbLog.TextLength > 200000)
             {
-                rtbLog.BeginInvoke(new Action(() =>
-                    AppendLog(message, color)
-                ));
-                return;
+                rtbLog.Select(0, rtbLog.TextLength - 100000);
+                rtbLog.SelectedText = "";
             }
-
             rtbLog.SelectionStart = rtbLog.TextLength;
             rtbLog.SelectionLength = 0;
-
             rtbLog.SelectionColor = color ?? Color.FromArgb(206, 220, 232);
-
             rtbLog.AppendText(message + Environment.NewLine);
             rtbLog.ScrollToCaret();
         }
@@ -285,10 +257,18 @@ namespace APEX.Compiler.GUI
 
         private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
         {
+            if (buildCancellation != null)
+            {
+                e.Cancel = true;
+                closeAfterBuild = true;
+                buildCancellation.Cancel();
+                return;
+            }
             Properties.Settings.Default.SourcePath = txtSource.Text;
             Properties.Settings.Default.OutputPath = txtOutput.Text;
 
-            Properties.Settings.Default.Save();
+            try { Properties.Settings.Default.Save(); }
+            catch (System.Configuration.ConfigurationErrorsException) { }
         }
 
         private void btnOpenOutput_Click(object sender, EventArgs e)

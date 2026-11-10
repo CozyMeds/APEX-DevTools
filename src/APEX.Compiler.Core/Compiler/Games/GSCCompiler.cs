@@ -1,0 +1,1330 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using Irony.Parsing;
+using T7CompilerLib.ScriptComponents;
+using TreyarchCompiler.Games.BO3;
+using TreyarchCompiler.Interface;
+using TreyarchCompiler.Utilities;
+
+// These allow us to hotswap the global definitions for these enums, which may be necessary as new games are added.
+using ScriptContext = T7CompilerLib.ScriptContext;
+using ScriptOpCode = T7CompilerLib.OpCodes.ScriptOpCode;
+using ImportFlags = T7CompilerLib.ScriptComponents.T7Import.T7ImportFlags;
+using ExportFlags = T7CompilerLib.ScriptExportFlags;
+using T7ScriptObject = T7CompilerLib.T7ScriptObject;
+using T7CompilerLib.OpCodes;
+using T7CompilerLib;
+
+namespace TreyarchCompiler.Games
+{
+    internal class GSCCompiler : BLOPSCompilerBase, ICompiler
+    {
+        private static bool EnableStatPtrProtect = true;
+
+        /// <summary>
+        /// This sucks. This is the best way since our terms are not static
+        /// </summary>
+        private const string CALL_PTR_TERMNAME = "baseCallPointer";
+        private uint ScriptNamespace = 0xDEADBEEF;
+
+        protected virtual T7ScriptObject NewScript => new T7ScriptObject(true);
+        private readonly T7ScriptObject Script;
+
+        private readonly Dictionary<string, ScriptFunctionMetaData> FunctionMetadata;
+        private readonly Dictionary<string, ParseTreeNode> Macros = new Dictionary<string, ParseTreeNode>();
+
+
+        private int temporaryIdentifier;
+        private int emissionSteps;
+        private readonly Stack<QOperand> ScriptOperands = new Stack<QOperand>();
+
+        private Dictionary<string, string> Func_StatProtectMap = new Dictionary<string, string>();
+        private HashSet<string> CustomInjects = new HashSet<string>();
+
+        public GSCCompiler(string code, string path, bool uset8masking)
+        {
+            FunctionMetadata = new Dictionary<string, ScriptFunctionMetaData>();
+            _path = path;
+            uset8masking = false;
+
+            Script = NewScript;
+            Script.UseMasking = uset8masking;
+            code = AppendProtectionSource(code);
+
+            _tree = ParseCode(code);
+        }
+
+        private string AppendProtectionSource(string code)
+        {
+            return code;
+        }
+
+        private ParseTree ParseCode(string code)
+        {
+            return BO3Syntax.ParseCode(code);
+        }
+
+        /// <summary>
+        /// Type cast for T7 to allow better type safety while designing dynamic code
+        /// </summary>
+        /// <returns></returns>
+        private T7ScriptObject T7()
+        {
+            return Script as T7ScriptObject;
+        }
+
+        public CompiledCode Compile()
+        {
+            var data = new CompiledCode();
+            try
+            {
+                CompileTree();
+                data.CompiledScript = Script.Serialize();
+                ApexCompiler.Core.GsccValidator.Validate(data.CompiledScript);
+                data.HashMap = Script.GetHashMap();
+            }
+            catch (CompilationException ex)
+            {
+                data.Error = ex.Message;
+                data.ErrorLine = ex.Line;
+                data.ErrorColumn = ex.Column;
+            }
+            catch (Exception ex)
+            {
+                data.Error = ex.Message;
+            }
+            return data;
+        }
+
+        public CompiledCode Compile(string address) => Compile();
+
+        private void ValidateMacros()
+        {
+            var complete = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var name in Macros.Keys)
+                VisitMacro(name, new HashSet<string>(StringComparer.Ordinal), complete);
+        }
+
+        private int VisitMacro(string name, HashSet<string> active, Dictionary<string, int> complete)
+        {
+            if (complete.TryGetValue(name, out int cachedDepth)) return cachedDepth;
+            if (!active.Add(name))
+                throw new ArgumentException("Recursive macro definition: " + name);
+            if (active.Count > 128)
+                throw new ArgumentException("Macro expansion nesting exceeds 128 levels.");
+            int depth = 1;
+            var nodes = new Stack<ParseTreeNode>();
+            nodes.Push(Macros[name]);
+            while (nodes.Count > 0)
+            {
+                var node = nodes.Pop();
+                if (node.Term.Name == "identifier" && node.Token != null)
+                {
+                    var reference = node.Token.ValueString.ToLowerInvariant();
+                    if (Macros.ContainsKey(reference)) depth = Math.Max(depth, 1 + VisitMacro(reference, active, complete));
+                }
+                // Field names and function/namespace labels are hashed directly, not macro-expanded.
+                if (node.Term.Name == "directAccess") nodes.Push(node.ChildNodes[0]);
+                else if (node.Term.Name == "baseCall") nodes.Push(node.ChildNodes[node.ChildNodes.Count - 1]);
+                else if (node.Term.Name != "getFunction" && node.Term.Name != "gscForFunction")
+                    foreach (var child in node.ChildNodes) nodes.Push(child);
+            }
+            active.Remove(name);
+            if (depth > 128) throw new ArgumentException("Macro expansion nesting exceeds 128 levels.");
+            complete.Add(name, depth);
+            return depth;
+        }
+
+        private void CompileTree()
+        {
+            if (_tree.HasErrors())
+                throw new CompilationException(_tree.ParserMessages[0].Message, _tree.ParserMessages[0].Location.Line, _tree.ParserMessages[0].Location.Column);
+
+            Script.Name.Value = "";
+
+            SetNamespace();
+
+            var functionTree = new Dictionary<string, ParseTreeNode>();
+
+            if (_tree.Root.ChildNodes[0].ChildNodes.Count > 0)
+                foreach (var directive in _tree.Root.ChildNodes[0].ChildNodes[0].ChildNodes.OrderBy(x => x.ChildNodes[0].Term.Name.ToLowerInvariant() == "functions"))
+                {
+                    byte flags = (byte)ExportFlags.Private;
+                    var FunctionFrame = directive;
+                    switch (directive.ChildNodes[0].Term.Name.ToLowerInvariant())
+                    {
+                        case "includes":
+                            foreach (var node in directive.ChildNodes[0].ChildNodes)
+                                Script.Includes.Add(NormalizeUsing(node.Token.ValueString));
+                            break;
+
+                        case "globals":
+                            Macros[directive.ChildNodes[0].ChildNodes[0].FindTokenAndGetText().ToLowerInvariant()] = directive.ChildNodes[0].ChildNodes[2];
+                            break;
+
+                        case "functionframe":
+
+                            FunctionFrame = directive.ChildNodes[0];
+                            if (FunctionFrame.ChildNodes[0].Term.Name == "autoexec")
+                                flags |= (byte)ExportFlags.AutoExec;
+
+                            goto functionsLabel;
+
+                        case "functions":
+                            functionsLabel:
+                            var function = FunctionFrame.ChildNodes[FunctionFrame.ChildNodes.Count - 1];
+                            var functionName = function.ChildNodes[function.ChildNodes.FindIndex(e => e.Term.Name == "identifier")].Token.ValueString.ToLowerInvariant();
+                            var Parameters = function.ChildNodes[function.ChildNodes.FindIndex(e => e.Term.Name == "parameters")].ChildNodes[0].ChildNodes;
+
+                            if (FunctionMetadata.ContainsKey(functionName))
+                                throw new ArgumentException($"Function '{functionName}' has been defined more than once.");
+
+                            functionTree.Add(functionName, function);
+                            FunctionMetadata[functionName] = new ScriptFunctionMetaData()
+                            {
+                                FunctionHash = Script.ScriptHash(functionName),
+                                NamespaceHash = ScriptNamespace,
+                                FunctionName = functionName,
+                                NamespaceName = "ilcustom",
+                                NumParams = BinaryLimits.ByteCount(Parameters.Count, "Function parameters"),
+                                Flags = flags
+                            };
+
+                            break;
+                    }
+                }
+
+            ValidateMacros();
+
+            //Iterate over all function declarations
+            foreach (var item in functionTree)
+            {
+                _currentDeclaration = item.Key;
+                EmitFunction(item.Value, item.Key);
+            }
+        }
+
+        private void EmitFunction(ParseTreeNode functionNode, string FunctionName)
+        {
+            var Parameters = functionNode.ChildNodes[functionNode.ChildNodes.FindIndex(e => e.Term.Name == "parameters")].ChildNodes[0].ChildNodes;
+
+            T7ScriptExport CurrentFunction = CreateFunction(functionNode, FunctionName);
+            CurrentFunction.Flags = FunctionMetadata[FunctionName].Flags;
+            CurrentFunction.FriendlyName = FunctionName;
+
+            foreach (var paramNode in Parameters)
+                AddLocal(CurrentFunction, paramNode.FindTokenAndGetText().ToLowerInvariant());
+
+            IEnumerable<string> locals = CollectLocalVariables(CurrentFunction, functionNode.ChildNodes[functionNode.ChildNodes.FindIndex(e => e.Term.Name == "block")], false);
+
+            foreach (var variable in locals)
+                AddLocal(CurrentFunction, variable.ToLowerInvariant());
+
+            ScriptOperands.Clear();
+            bool IsCustomInject = CustomInjects.Contains(FunctionName.ToLowerInvariant());
+
+            EmitOptionalParameters(CurrentFunction, Parameters, IsCustomInject);
+            ScriptOperands.Clear();
+
+            Push(CurrentFunction, functionNode.ChildNodes[functionNode.ChildNodes.FindIndex(e => e.Term.Name == "block")], 0);
+            IterateStack(IsCustomInject);
+
+            CurrentFunction.AddOp(ScriptOpCode.End);
+        }
+
+        private void IterateStack(bool IsCustomInject)
+        {
+            while (ScriptOperands.Count > 0)
+            {
+                if (++emissionSteps > 2000000)
+                    throw new InvalidOperationException("Compilation exceeded the expression expansion limit.");
+                var CurrentOp = ScriptOperands.Pop();
+
+                if (!CurrentOp.IsParseNode)
+                    continue; //Stack misalignment
+
+                var node = CurrentOp.ObjectNode;
+                var CurrentFunction = CurrentOp.CurrentFunction;
+                var Context = CurrentOp.Context;
+
+                if (CurrentOp.GetOperands != null)
+                {
+                    if (!CurrentOp.GetOperands.MoveNext())
+                        continue;
+
+                    Push(CurrentOp);
+                    Push(CurrentOp.GetOperands.Current);
+                    continue;
+                }
+
+                if (IsCustomInject)
+                    Context |= (byte)ScriptContext.IsCustomInject;
+
+                switch (node.Term.Name)
+                {
+                    case "statement":
+                    case "statementBlock":
+                    case "declaration":
+                    case "parenExpr":
+                    case "block":
+                        if (node.ChildNodes.Count > 0)
+                            Push(CurrentOp.Replace(0));
+                        break;
+
+                    case "blockContent":
+                        foreach (var child in node.ChildNodes[0].ChildNodes.AsEnumerable().Reverse())
+                            Push(CurrentFunction, child, Context);
+                        break;
+
+                    case "jumpStatement":
+                        int offset = 1;
+
+                        if (node.ChildNodes.Count > 1)
+                            offset = (int)node.ChildNodes[1].Token.Value;
+
+                        offset = Math.Max(1, offset);
+                        offset--;
+                        if (node.ChildNodes[0].Term.Name == "continue")
+                            CurrentFunction.PushLCF(true, offset);
+                        else
+                            CurrentFunction.PushLCF(false, offset);
+                        break;
+
+                    case "newArray":
+                        CurrentFunction.AddOp(ScriptOpCode.GetEmptyArray);
+                        break;
+
+                    case "array":
+                        CurrentOp.SetOperands = EmitArray(CurrentOp);
+                        Push(CurrentOp);
+                        break;
+
+                    case "shortHandArray":
+                        throw new NotImplementedException("An array shorthand was passed in an invalid context to the node handler.");
+
+                    case "ifStatement":
+                        int count = node.ChildNodes.Count;
+
+                        CurrentOp.SetOperands = EmitConditionalJump(CurrentFunction, node.ChildNodes[1], node.ChildNodes[2], count == 4 ? node.ChildNodes[3].ChildNodes[1] : null);
+                        Push(CurrentOp);
+                        break;
+
+                    case "whileStatement":
+                        CurrentOp.SetOperands = EmitWhile(CurrentFunction, node, Context);
+                        Push(CurrentOp);
+                        break;
+
+                    case "forStatement":
+                        CurrentOp.SetOperands = EmitForLoop(CurrentFunction, node, Context);
+                        Push(CurrentOp);
+                        break;
+
+                    case "conditionalStatement":
+                        CurrentOp.SetOperands = EmitConditionalJump(CurrentFunction, node.ChildNodes[0], node.ChildNodes[2], node.ChildNodes[4]);
+                        Push(CurrentOp);
+                        break;
+
+                    case "switchStatement":
+                        CurrentOp.SetOperands = EmitSwitchStatement(CurrentFunction, node);
+                        Push(CurrentOp);
+                        break;
+
+                    case "simpleCall":
+                        Push(CurrentFunction, node.ChildNodes[0], (uint)ScriptContext.DecTop);
+                        break;
+
+                    case "call":
+                        CurrentOp.SetOperands = EmitCall(CurrentFunction, node, Context);
+                        Push(CurrentOp);
+                        break;
+
+                    case "wait":
+                        CurrentOp.SetOperands = EmitWait(CurrentFunction, node, Context);
+                        Push(CurrentOp);
+                        break;
+
+                    case "return":
+                        CurrentOp.SetOperands = EmitReturn(CurrentFunction, node, Context);
+                        Push(CurrentOp);
+                        break;
+
+                    case "waitTillFrameEnd":
+                        if (node.ChildNodes[0].Token.ValueString == "waittillframeend")
+                            CurrentFunction.AddOp(ScriptOpCode.WaitTillFrameEnd);
+                        break;
+
+                    case "setVariableField":
+                        CurrentOp.SetOperands = EmitSVFOrShorthand(CurrentFunction, node, Context);
+                        Push(CurrentOp);
+                        break;
+
+                    case "directAccess":
+                        CurrentOp.SetOperands = EmitEvalFieldVariable(CurrentFunction, node, Context);
+                        Push(CurrentOp);
+                        break;
+
+                    case "foreachSingle":
+                    case "foreachDouble":
+                        CurrentOp.SetOperands = EmitForeach(CurrentFunction, node);
+                        Push(CurrentOp);
+                        break;
+
+                    case "booleanExpression":
+                        CurrentOp.SetOperands = EmitBoolExpr(CurrentFunction, node, Context);
+                        Push(CurrentOp);
+                        break;
+
+                    case "boolNot":
+                        CurrentOp.SetOperands = EmitBoolNot(CurrentFunction, node, Context);
+                        Push(CurrentOp);
+                        break;
+
+                    case "size":
+                        CurrentOp.SetOperands = EmitSizeof(CurrentFunction, node, Context);
+                        Push(CurrentOp);
+                        break;
+
+                    case "relationalExpression":
+                        CurrentOp.SetOperands = EmitRelationalExpression(CurrentFunction, node, Context);
+                        Push(CurrentOp);
+                        break;
+
+                    case "include_identifier":
+                    case "identifier":
+                        string LocalToLower = node.Token.ValueString.ToLowerInvariant();
+                        if (Macros.TryGetValue(LocalToLower, out ParseTreeNode MacroNode))
+                            Push(CurrentFunction, MacroNode, Context);
+                        else
+                            AddEvalLocal(CurrentFunction, LocalToLower, HasContext(Context, ScriptContext.IsRef), HasContext(Context, ScriptContext.Waittill));
+                        break;
+
+                    case "stringLiteral":
+                        AddGetString(CurrentFunction, node.Token.ValueString);
+                        break;
+
+                    case "hashedString":
+
+                        string hashval = node.ChildNodes[1].Token.ValueString.ToLowerInvariant().Replace("hash_", "");
+                        try
+                        {
+                            CurrentFunction.AddGetHash(uint.Parse(hashval, System.Globalization.NumberStyles.HexNumber));
+                        }
+                        catch
+                        {
+                            throw new ArgumentException("Tried to hash string '" + node.ChildNodes[1].Token.ValueString.ToLowerInvariant() + "', but it is not a hash value.");
+                        }
+                        break;
+
+                    case "iString":
+                        CurrentFunction.AddGetString(Script.Strings.AddString(node.ChildNodes[1].Token.ValueString), true);
+                        break;
+
+                    case "numberLiteral":
+                        CurrentFunction.AddGetNumber(node.Token.Value);
+                        break;
+
+                    case "expression+":
+                    case "expression":
+                        CurrentOp.SetOperands = EmitExpression(CurrentFunction, node, Context);
+                        Push(CurrentOp);
+                        break;
+
+                    case "getFunction":
+                        EmitFunctionPtr(CurrentFunction, node, 0, HasContext(Context, ScriptContext.IsCustomInject));
+                        break;
+
+                    case "vector":
+                        CurrentOp.SetOperands = EmitVector(CurrentFunction, node, Context);
+
+                        Push(CurrentOp);
+                        break;
+
+                    default:
+                        foreach (var child in node.ChildNodes.AsEnumerable().Reverse())
+                            Push(CurrentFunction, child, Context);
+                        break;
+                }
+            }
+        }
+
+        private IEnumerable<QOperand> EmitVector(T7ScriptExport CurrentFunction, ParseTreeNode node, uint Context)
+        {
+            yield return new QOperand(CurrentFunction, node.ChildNodes[2], 0);
+            yield return new QOperand(CurrentFunction, node.ChildNodes[1], 0);
+            yield return new QOperand(CurrentFunction, node.ChildNodes[0], 0);
+            CurrentFunction.AddOp(ScriptOpCode.Vector);
+        }
+
+        private void EmitFunctionPtr(T7ScriptExport CurrentFunction, ParseTreeNode node, byte Numparams, bool NoRefReplace)
+        {
+            ParseTreeNode FuncNameNode = node.ChildNodes[node.ChildNodes.Count - 1];
+            ParseTreeNode NSNode = null;
+
+            if (node.ChildNodes.Count > 1)
+                NSNode = node.ChildNodes[0];
+
+            uint t7_ns = ScriptNamespace;
+
+            if (NSNode != null)
+            {
+                    t7_ns = Script.ScriptHash(NSNode.ChildNodes[0].FindTokenAndGetText().ToLowerInvariant());
+            }
+
+            byte Flags = (byte)ImportFlags.IsRef;
+
+            if (t7_ns == ScriptNamespace)
+                Flags |= (byte)ImportFlags.NeedsResolver;
+
+            string fname = FuncNameNode.ChildNodes[0].FindTokenAndGetText().ToLowerInvariant();
+            uint FunctionID = Script.ScriptHash(fname);
+
+            if (NoRefReplace || !T7().IsStatPtrProtected(FunctionID) || !EnableStatPtrProtect)
+            {
+                CurrentFunction.AddFunctionPtr(Script.Imports.AddImport(FunctionID, t7_ns, Numparams, Flags));
+                return;
+            }
+
+            fname = Func_StatProtectMap[fname];
+            t7_ns = ScriptNamespace;
+            FunctionID = Script.ScriptHash(fname);
+            Flags |= (byte)ImportFlags.NeedsResolver;
+
+            CurrentFunction.AddFunctionPtr(Script.Imports.AddImport(FunctionID, t7_ns, Numparams, Flags));
+        }
+
+        private IEnumerable<QOperand> EmitExpression(T7ScriptExport CurrentFunction, ParseTreeNode node, uint Context)
+        {
+            yield return new QOperand(CurrentFunction, node.ChildNodes[0], 0);
+            yield return new QOperand(CurrentFunction, node.ChildNodes[2], 0);
+            CurrentFunction.AddMathToken(node.ChildNodes[1].Term.Name);
+        }
+
+        private void AddGetString(T7ScriptExport CurrentFunction, string Value)
+        {
+            (CurrentFunction as T7ScriptExport).AddGetString(T7().Strings.AddString(Value));
+        }
+
+        private IEnumerable<QOperand> EmitRelationalExpression(T7ScriptExport CurrentFunction, ParseTreeNode node, uint Context)
+        {
+            yield return new QOperand(CurrentFunction, node.ChildNodes[0], 0);
+            yield return new QOperand(CurrentFunction, node.ChildNodes[2], 0);
+            CurrentFunction.AddCompareOp(node.ChildNodes[1].ChildNodes[0].Term.Name);
+        }
+
+        private IEnumerable<QOperand> EmitSizeof(T7ScriptExport CurrentFunction, ParseTreeNode node, uint Context)
+        {
+            yield return new QOperand(CurrentFunction, node.ChildNodes[0], 0);
+            CurrentFunction.AddOp(ScriptOpCode.SizeOf);
+        }
+
+        private IEnumerable<QOperand> EmitBoolNot(T7ScriptExport CurrentFunction, ParseTreeNode node, uint Context)
+        {
+            yield return new QOperand(CurrentFunction, node.ChildNodes[1], 0);
+            CurrentFunction.AddOp(ScriptOpCode.BoolNot);
+        }
+
+        private IEnumerable<QOperand> EmitForeach(T7ScriptExport CurrentFunction, ParseTreeNode node)
+        {
+            if (!CurrentFunction.TryPopFEPair(out KeyValuePair<string, string> KeyPair))
+                throw new InvalidOperationException("Tried to compile more foreach statements than were expected");
+
+            int KeyIndex = node.ChildNodes.FindIndex(e => e.Term.Name == "key");
+
+            string KeyName = KeyIndex != -1 ? node.ChildNodes[KeyIndex].FindTokenAndGetText().ToLowerInvariant() : KeyPair.Value;
+            string ValueName = node.ChildNodes[node.ChildNodes.FindIndex(e => e.Term.Name == "value")].FindTokenAndGetText().ToLowerInvariant();
+            string ArrayName = KeyPair.Key;
+
+            yield return new QOperand(CurrentFunction, node.ChildNodes[node.ChildNodes.FindIndex(e => e.Term.Name == "expr")], 0);
+            AddEvalLocal(CurrentFunction, ArrayName, true);
+            CurrentFunction.AddOp(ScriptOpCode.SetVariableField);
+
+            AddEvalLocal(CurrentFunction, ArrayName, false);
+            CurrentFunction.AddOp(ScriptOpCode.FirstArrayKey);
+            AddEvalLocal(CurrentFunction, KeyName, true);
+            CurrentFunction.AddOp(ScriptOpCode.SetVariableField);
+
+            EnterLoop(CurrentFunction);
+
+            var __header = CurrentFunction.Locals.GetEndOfChain();
+
+            AddEvalLocal(CurrentFunction, KeyName, false);
+            CurrentFunction.AddOp(ScriptOpCode.IsDefined);
+
+            var __jmp = CurrentFunction.AddJump(ScriptOpCode.JumpOnFalse);
+
+            AddEvalLocal(CurrentFunction, KeyName, false);
+            AddEvalLocal(CurrentFunction, ArrayName, false);
+            CurrentFunction.AddOp(ScriptOpCode.EvalArray);
+            AddEvalLocal(CurrentFunction, ValueName, true);
+            CurrentFunction.AddOp(ScriptOpCode.SetVariableField);
+
+            yield return new QOperand(CurrentFunction, node.ChildNodes[node.ChildNodes.Count - 1], 0);
+
+            var __foreach_header = CurrentFunction.Locals.GetEndOfChain();
+
+            AddEvalLocal(CurrentFunction, KeyName, false);
+            AddEvalLocal(CurrentFunction, ArrayName, false);
+            CurrentFunction.AddOp(ScriptOpCode.NextArrayKey);
+            AddEvalLocal(CurrentFunction, KeyName, true);
+            CurrentFunction.AddOp(ScriptOpCode.SetVariableField);
+
+            var __footer = CurrentFunction.AddJump(ScriptOpCode.Jump);
+            __footer.After = __header;
+            __jmp.After = __footer;
+
+            ExitLoop(CurrentFunction, __foreach_header, __footer);
+        }
+
+        private IEnumerable<QOperand> EmitEvalFieldVariable(T7ScriptExport CurrentFunction, ParseTreeNode node, uint Context)
+        {
+            foreach (var val in EmitObject(CurrentFunction, node.ChildNodes[0].ChildNodes[0], Context | (uint)ScriptContext.IsRef))
+            {
+                yield return val;
+            }
+
+            AddFieldVariable(CurrentFunction, node.ChildNodes[1].FindTokenAndGetText(), Context);
+        }
+
+        private void AddFieldVariable(T7ScriptExport CurrentFunction, string FVIdentifier, uint Context)
+        {
+            (CurrentFunction as T7ScriptExport).AddFieldVariable(T7().ScriptHash(FVIdentifier.ToLowerInvariant()), Context);
+        }
+
+        private IEnumerable<QOperand> EmitShortArray(T7ScriptExport CurrentFunction, KeyValuePair<ParseTreeNode, ParseTreeNode> shRef, uint Context)
+        {
+            ParseTreeNode ShortHand = shRef.Key;
+            ParseTreeNode Setter = shRef.Value;
+
+            for (int i = 0; i < ShortHand.ChildNodes.Count; i++)
+            {
+                yield return new QOperand(CurrentFunction, ShortHand.ChildNodes[i], 0);
+                CurrentFunction.AddGetNumber(i);
+
+                yield return new QOperand(CurrentFunction, Setter, Context | (uint)ScriptContext.IsRef);
+
+                CurrentFunction.AddOp(ScriptOpCode.EvalArrayRef);
+                CurrentFunction.AddOp(ScriptOpCode.SetVariableField);
+            }
+        }
+
+        private IEnumerable<QOperand> EmitSVFOrShorthand(T7ScriptExport CurrentFunction, ParseTreeNode node, uint Context)
+        {
+            foreach (var val in EmitSetVariableField(CurrentFunction, node, 0))
+            {
+                yield return val;
+            }
+
+            KeyValuePair<ParseTreeNode, ParseTreeNode> shRef = ArrayContext;
+
+            if (shRef.Key != null)
+                foreach (var val in EmitShortArray(CurrentFunction, shRef, 0))
+                    yield return val;
+        }
+
+        private IEnumerable<QOperand> EmitReturn(T7ScriptExport CurrentFunction, ParseTreeNode node, uint Context)
+        {
+            if (node.ChildNodes.Count > 1)
+            {
+                yield return new QOperand(CurrentFunction, node.ChildNodes[1], 0);
+                CurrentFunction.AddOp(ScriptOpCode.Return);
+            }
+            else
+            {
+                CurrentFunction.AddOp(ScriptOpCode.End);
+            }
+        }
+
+        private IEnumerable<QOperand> EmitWait(T7ScriptExport CurrentFunction, ParseTreeNode node, uint Context)
+        {
+            yield return new QOperand(CurrentFunction, node.ChildNodes[1], 0);
+            CurrentFunction.AddOp(ScriptOpCode.Wait);
+        }
+
+        private IEnumerable<QOperand> EmitCall(T7ScriptExport CurrentFunction, ParseTreeNode callNode, uint Context)
+        {
+            //We will receive a Call term, which consists of a CallFrame and an optional CallPrefix
+
+            ParseTreeNode CallFrame = callNode.ChildNodes[callNode.ChildNodes.Count - 1];
+            ParseTreeNode BaseCall = CallFrame.ChildNodes[0];
+            ParseTreeNode CallPrefix = callNode.ChildNodes.Count > 1 ? callNode.ChildNodes[0] : null;
+            ParseTreeNode Caller = null;
+
+            string function_name = BaseCall.ChildNodes[BaseCall.ChildNodes.Count - 2].FindTokenAndGetText().ToLowerInvariant();
+
+            string NS_String = null;
+            uint fhash = Script.ScriptHash(function_name);
+
+            if (BaseCall.ChildNodes[0].Term.Name == "gscForFunction")
+                NS_String = NormalizeUsing(BaseCall.ChildNodes[0].ChildNodes[0].FindTokenAndGetText()).Trim();
+
+            ParseTreeNode CallParameters = BaseCall.ChildNodes[BaseCall.ChildNodes.Count - 1].ChildNodes[0];
+            ParseTreeNodeList parameters = CallParameters.ChildNodes;
+
+            //Our context should update if we have a prefix
+            if (CallPrefix != null)
+            {
+                if (CallPrefix.ChildNodes[0].Term.Name == "expr")
+                {
+                    Context |= (uint)ScriptContext.HasCaller;
+                    Caller = CallPrefix.ChildNodes[0];
+                }
+
+                if (CallPrefix.ChildNodes[CallPrefix.ChildNodes.Count - 1].Term.Name == "thread")
+                    Context |= (uint)ScriptContext.Threaded;
+            }
+
+            //Update the context if we are using a call pointer term
+            if (CallFrame.ChildNodes[0].Term.Name == CALL_PTR_TERMNAME)
+                Context |= (uint)ScriptContext.IsPointer;
+
+            //Checking builtins first
+            if (!HasContext(Context, ScriptContext.IsPointer) && !HasContext(Context, ScriptContext.Threaded) && NS_String == null)
+            {
+                //Builtin methods can be resolved here because they have specific emission patterns per function
+                if (IsBuiltinMethod(function_name))
+                {
+                    var returnsValue = BuiltinSignatures.Validate(function_name, parameters.Count,
+                        HasContext(Context, ScriptContext.HasCaller));
+                    T7OpCode result;
+
+                    if (HasContext(Context, ScriptContext.HasCaller))
+                    {
+                        foreach (var val in EmitNotifierCall(CurrentFunction, CallPrefix, BaseCall))
+                        {
+                            yield return val;
+                        }
+                        result = (T7OpCode)ScriptOperands.Pop().ObjectValue;
+                    }
+                    else
+                    {
+                        parameters.Reverse();
+                        foreach (ParseTreeNode parameter in parameters)
+                        {
+                            yield return new QOperand(CurrentFunction, parameter, 0);
+                        }
+
+                        result = CurrentFunction.TryAddBuiltInCall(BaseCall.ChildNodes[0].Token.ValueString.ToLowerInvariant());
+                    }
+
+                    if (result != null)
+                    {
+                        if (returnsValue && HasContext(Context, ScriptContext.DecTop))
+                            CurrentFunction.AddOp(ScriptOpCode.DecTop);
+                        if (!returnsValue && !HasContext(Context, ScriptContext.DecTop))
+                            throw new ArgumentException("Builtin '" + function_name + "' does not return a value.");
+                        yield break;
+                    }
+
+                    throw new NotImplementedException($"Call to builtin method '{BaseCall.ChildNodes[0].Token.ValueString}' has not been handled!");
+                }
+            }
+
+            //All calls need parameters!
+            CurrentFunction.AddOp(ScriptOpCode.PreScriptCall);
+
+            bool DoProtect = EnableStatPtrProtect && !HasContext(Context, ScriptContext.IsCustomInject) && T7().IsStatProtected(fhash);
+
+            parameters.Reverse();
+            foreach (ParseTreeNode parameter in parameters)
+            {
+                yield return new QOperand(CurrentFunction, parameter, 0);
+            }
+
+            if (T7().Imports.IsBuiltinImport(fhash))
+                (CurrentFunction as T7ScriptExport).AddGetNumber((int)fhash);
+
+            if (HasContext(Context, ScriptContext.HasCaller))
+                yield return new QOperand(CurrentFunction, Caller, 0);
+
+            if (HasContext(Context, ScriptContext.IsPointer))
+            {
+                yield return new QOperand(CurrentFunction, CallFrame.ChildNodes[0].ChildNodes[0], 0);
+
+                CurrentFunction.AddCallPtr(Context, BinaryLimits.ByteCount(parameters.Count, "Call arguments"));
+            }
+            else
+            {
+                uint t7_ns = ScriptNamespace; //newer games automatically figure out you want a builtin if its the same namespace
+
+                if (NS_String != null)
+                    t7_ns = Script.ScriptHash(NS_String);
+
+                byte Flags = 0;
+
+                if (HasContext(Context, ScriptContext.Threaded))
+                    Flags |= (byte)ImportFlags.IsRef;
+
+                if (HasContext(Context, ScriptContext.HasCaller))
+                    Flags |= (byte)ImportFlags.IsMethod;
+                else
+                    Flags |= (byte)ImportFlags.IsFunction;
+
+                if (t7_ns == ScriptNamespace)
+                    Flags |= (byte)ImportFlags.NeedsResolver;
+
+                // will work for either game
+                if (T7Import.DevFunctions.Contains(function_name) && t7_ns == ScriptNamespace)
+                    Flags |= (byte)ImportFlags.IsDebug;
+
+                T7Import ImportRef;
+
+                ImportRef = Script.Imports.AddImport(fhash, t7_ns, BinaryLimits.ByteCount(parameters.Count, "Call arguments"), Flags);
+
+                CurrentFunction.AddCall(ImportRef, Context);
+            }
+
+            if (HasContext(Context, ScriptContext.DecTop))
+                CurrentFunction.AddOp(ScriptOpCode.DecTop);
+        }
+
+        private IEnumerable<QOperand> EmitNotifierCall(T7ScriptExport CurrentFunction, ParseTreeNode CallPrefix, ParseTreeNode BaseCall)
+        {
+            ParseTreeNode CallParameters = BaseCall.ChildNodes[1].ChildNodes[0];
+            ParseTreeNodeList parameters = CallParameters.ChildNodes;
+
+            switch (BaseCall.ChildNodes[0].Token.ValueString.ToLowerInvariant())
+            {
+                case "waittillmatch":
+                case "waittill":
+
+                    yield return new QOperand(CurrentFunction, parameters[0], 0);
+                    foreach (var val in EmitObject(CurrentFunction, CallPrefix, 0))
+                        yield return val;
+
+                    CurrentFunction.AddOp(ScriptOpCode.WaitTill);
+
+                    for (int i = 1; i < parameters.Count; i++)
+                    {
+                        yield return new QOperand(CurrentFunction, parameters[i], (uint)ScriptContext.Waittill);
+                    }
+
+                    PushObject(CurrentFunction.AddOp(ScriptOpCode.ClearParams));
+                    yield break;
+
+                case "notify":
+
+                    parameters.Reverse();
+                    CurrentFunction.AddOp(ScriptOpCode.PreScriptCall);
+
+                    foreach (ParseTreeNode parameter in parameters)
+                    {
+                        yield return new QOperand(CurrentFunction, parameter, 0);
+                    }
+
+                    foreach (var val in EmitObject(CurrentFunction, CallPrefix, 0))
+                        yield return val;
+
+                    PushObject(CurrentFunction.AddOp(ScriptOpCode.Notify));
+                    yield break;
+
+                case "endon":
+
+                    parameters.Reverse();
+
+                    foreach (ParseTreeNode parameter in parameters)
+                        yield return new QOperand(CurrentFunction, parameter, 0);
+
+                    foreach (var val in EmitObject(CurrentFunction, CallPrefix, 0))
+                        yield return val;
+
+                    PushObject(CurrentFunction.AddOp(ScriptOpCode.EndOn));
+                    yield break;
+            }
+
+            throw new ArgumentException($"{BaseCall.ChildNodes[0].Token.ValueString.ToLowerInvariant()} was passed to EmitNotifierCall, but isnt a valid notfier");
+        }
+
+        private IEnumerable<QOperand> EmitObject(T7ScriptExport CurrentFunction, ParseTreeNode node, uint Context)
+        {
+            if (node.Token != null)
+            {
+                var op = CurrentFunction.TryAddBuiltIn(node.Token.ValueString, HasContext(Context, ScriptContext.IsRef));
+                if (op != null)
+                    yield break;
+            }
+
+            yield return new QOperand(CurrentFunction, node, 0);
+
+            if (HasContext(Context, ScriptContext.IsRef))
+                CurrentFunction.AddOp(ScriptOpCode.CastFieldObject);
+        }
+
+        private bool IsBuiltinMethod(string identifier)
+        {
+            return T7ScriptExport.IsBuiltinMethod(identifier);
+        }
+
+        private IEnumerable<QOperand> EmitSwitchStatement(T7ScriptExport CurrentFunction, ParseTreeNode node)
+        {
+            if (!CurrentFunction.TryPopSwitchKey(out string SWKey))
+                throw new InvalidOperationException("Tried to compile more switch statements than were expected");
+
+            ParseTreeNodeList SwitchContentsArray = node.ChildNodes[2].ChildNodes;
+
+            EnterLoop(CurrentFunction);
+
+            yield return new QOperand(CurrentFunction, node.ChildNodes[1], 0);
+            AddEvalLocal(CurrentFunction, SWKey, true);
+
+            CurrentFunction.AddOp(ScriptOpCode.SetVariableField);
+
+            ParseTreeNode DefaultNode = null;
+
+            foreach (var _node in SwitchContentsArray)
+            {
+                if (_node.ChildNodes[0].ChildNodes[0].Term.Name.ToLowerInvariant() == "default")
+                {
+                    DefaultNode = _node;
+                    break;
+                }
+            }
+
+            if (DefaultNode != null)
+            {
+                SwitchContentsArray.Remove(DefaultNode);
+                SwitchContentsArray.Add(DefaultNode);
+            }
+
+            List<T7OP_Jump> __orjumps = new List<T7OP_Jump>();
+
+            foreach (var _node in SwitchContentsArray)
+            {
+                if (_node == DefaultNode)
+                {
+                    foreach (var jmp in __orjumps)
+                        jmp.After = CurrentFunction.Locals.GetEndOfChain();
+
+                    __orjumps.Clear();
+
+                    if (DefaultNode.ChildNodes.Count > 1)
+                        yield return new QOperand(CurrentFunction, DefaultNode.ChildNodes[1], 0);
+
+                    break;
+                }
+
+                yield return new QOperand(CurrentFunction, _node.ChildNodes[0].ChildNodes[1], 0);
+                AddEvalLocal(CurrentFunction, SWKey, false);
+                CurrentFunction.AddCompareOp("==");
+
+
+                if (_node.ChildNodes.Count > 1)
+                {
+                    var __jmp = CurrentFunction.AddJump(ScriptOpCode.JumpOnFalse);
+
+                    foreach (var jmp in __orjumps)
+                        jmp.After = CurrentFunction.Locals.GetEndOfChain();
+
+                    __orjumps.Clear();
+
+                    yield return new QOperand(CurrentFunction, _node.ChildNodes[1], 0);
+
+                    __jmp.After = CurrentFunction.Locals.GetEndOfChain();
+                }
+                else
+                {
+                    var __jmp = CurrentFunction.AddJump(ScriptOpCode.JumpOnTrue);
+                    __orjumps.Add(__jmp);
+                }
+
+            }
+
+            foreach (var pending in __orjumps)
+                pending.After = CurrentFunction.Locals.GetEndOfChain();
+            ExitLoop(CurrentFunction, null, CurrentFunction.Locals.GetEndOfChain());
+        }
+
+        private KeyValuePair<ParseTreeNode, ParseTreeNode> ArrayContext;
+        private IEnumerable<QOperand> EmitSetVariableField(T7ScriptExport CurrentFunction, ParseTreeNode node, uint Context)
+        {
+            ParseTreeNode shNode = null;
+            ArrayContext = default;
+
+            if (node.ChildNodes[1].ChildNodes[0].Term.Name != "=" && node.ChildNodes.Count > 2)
+            {
+                yield return new QOperand(CurrentFunction, node.ChildNodes[0].ChildNodes[0], 0);
+                yield return new QOperand(CurrentFunction, node.ChildNodes[2].ChildNodes[0], 0);
+            }
+
+            switch (node.ChildNodes[1].ChildNodes[0].Term.Name)
+            {
+                case "++":
+                    yield return new QOperand(CurrentFunction, node.ChildNodes[0], Context | (uint)ScriptContext.IsRef);
+                    CurrentFunction.AddOp(ScriptOpCode.Inc);
+                    yield break;
+
+                case "--":
+                    yield return new QOperand(CurrentFunction, node.ChildNodes[0], Context | (uint)ScriptContext.IsRef);
+                    CurrentFunction.AddOp(ScriptOpCode.Dec);
+                    yield break;
+
+                case "=":
+                    if (node.ChildNodes[2].ChildNodes[0].Term.Name.ToLowerInvariant() == "shorthandarray") //set the variable to an empty array
+                    {
+                        shNode = node.ChildNodes[2].ChildNodes[0].ChildNodes[0]; //set a reference to the array for the array handler
+                        CurrentFunction.AddOp(ScriptOpCode.GetEmptyArray);
+                    }
+                    else
+                    {
+                        yield return new QOperand(CurrentFunction, node.ChildNodes[2].ChildNodes[0], 0);
+                    }
+                    break;
+
+                default:
+                    CurrentFunction.AddMathToken(node.ChildNodes[1].ChildNodes[0].Term.Name[0].ToString());
+                    break;
+
+            }
+
+            yield return new QOperand(CurrentFunction, node.ChildNodes[0].ChildNodes[0], Context | (uint)ScriptContext.IsRef);
+            CurrentFunction.AddOp(ScriptOpCode.SetVariableField);
+
+            ArrayContext = new KeyValuePair<ParseTreeNode, ParseTreeNode>(shNode, node.ChildNodes[0].ChildNodes[0]);
+        }
+
+        private IEnumerable<QOperand> EmitForLoop(T7ScriptExport CurrentFunction, ParseTreeNode node, uint Context)
+        {
+            EnterLoop(CurrentFunction);
+            ParseTreeNode Header = node.ChildNodes[1];
+
+            int SetVarIndex = Header.ChildNodes.FindIndex(e => e.Term.Name == "setVariableField");
+            int BoolExprIndex = Header.ChildNodes.FindIndex(e => e.Term.Name == "booleanExpression");
+            int IterateIndex = Header.ChildNodes.FindIndex(e => e.Term.Name == "forIterate");
+
+            if (SetVarIndex != -1)
+                yield return new QOperand(CurrentFunction, Header.ChildNodes[SetVarIndex], 0);
+
+            var __header = CurrentFunction.Locals.GetEndOfChain();
+            T7OP_Jump __jmp = null;
+
+            if (BoolExprIndex != -1)
+            {
+                foreach (var val in EmitBoolExpr(CurrentFunction, Header.ChildNodes[BoolExprIndex], 0))
+                {
+                    yield return val;
+                }
+                __jmp = CurrentFunction.AddJump(ScriptOpCode.JumpOnFalse);
+            }
+
+            yield return new QOperand(CurrentFunction, node.ChildNodes[2], 0);
+
+            var __ctheader = CurrentFunction.Locals.GetEndOfChain();
+
+            if (IterateIndex != -1)
+            {
+                foreach (var val in EmitSetVariableField(CurrentFunction, Header.ChildNodes[IterateIndex], Context))
+                {
+                    yield return val;
+                }
+            }
+
+            var __bottomjump = CurrentFunction.AddJump(ScriptOpCode.Jump);
+
+            __bottomjump.After = __header;
+
+            if (__jmp != null)
+                __jmp.After = __bottomjump;
+
+            ExitLoop(CurrentFunction, __ctheader, __bottomjump);
+        }
+
+        private void EnterLoop(T7ScriptExport CurrentFunction)
+        {
+            CurrentFunction.IncLCFContext();
+        }
+
+        private void ExitLoop(T7ScriptExport CurrentFunction, T7OpCode Header, T7OpCode Footer)
+        {
+            while (CurrentFunction.TryPopLCF(out T7OP_Jump __lcf))
+            {
+                __lcf.After = __lcf.RefHead ? Header : Footer;
+            }
+
+            CurrentFunction.DecLCFContext();
+        }
+
+        private IEnumerable<QOperand> EmitWhile(T7ScriptExport CurrentFunction, ParseTreeNode node, uint Context)
+        {
+            EnterLoop(CurrentFunction);
+
+            var __backref = CurrentFunction.Locals.GetEndOfChain();
+
+            foreach (var v in EmitBoolExpr(CurrentFunction, node.ChildNodes[1], 0))
+                yield return v;
+
+            var __while_jmp = CurrentFunction.AddJump(ScriptOpCode.JumpOnFalse);
+
+            yield return new QOperand(CurrentFunction, node.ChildNodes[2], 0);
+            var __while_jmp_back = CurrentFunction.AddJump(ScriptOpCode.Jump);
+
+            __while_jmp.After = __while_jmp_back;
+            __while_jmp_back.After = __backref;
+
+            ExitLoop(CurrentFunction, __backref, __while_jmp_back);
+        }
+
+        private IEnumerable<QOperand> EmitConditionalJump(T7ScriptExport CurrentFunction, ParseTreeNode BoolExpr, ParseTreeNode BlockContent, ParseTreeNode SecondBlock = null)
+        {
+            foreach (var entry in EmitBoolExpr(CurrentFunction, BoolExpr, 0))
+            {
+                yield return entry;
+            }
+
+            var __if_jmp = CurrentFunction.AddJump(ScriptOpCode.JumpOnFalse);
+            yield return new QOperand(CurrentFunction, BlockContent, 0);
+
+            if (SecondBlock != null)
+            {
+                var __else_jmp = CurrentFunction.AddJump(ScriptOpCode.Jump);
+                __if_jmp.After = CurrentFunction.Locals.GetEndOfChain();
+
+                yield return new QOperand(CurrentFunction, SecondBlock, 0);
+                __else_jmp.After = CurrentFunction.Locals.GetEndOfChain();
+            }
+            else
+            {
+                __if_jmp.After = CurrentFunction.Locals.GetEndOfChain();
+            }
+        }
+
+        private IEnumerable<QOperand> EmitBoolExpr(T7ScriptExport CurrentFunction, ParseTreeNode node, uint Context)
+        {
+            switch (node.ChildNodes.Count)
+            {
+                case 0:
+                    yield break;
+
+                case 1:
+                    yield return new QOperand(CurrentFunction, node.ChildNodes[0], Context);
+                    yield break;
+
+                case 3:
+
+                    yield return new QOperand(CurrentFunction, node.ChildNodes[0], 0);
+                    var target = node.ChildNodes[1].Term.Name == "&&" ? ScriptOpCode.JumpOnFalseExpr : ScriptOpCode.JumpOnTrueExpr;
+                    var __jmp = CurrentFunction.AddJump(target);
+                    yield return new QOperand(CurrentFunction, node.ChildNodes[2], 0);
+                    __jmp.After = CurrentFunction.Locals.GetEndOfChain();
+
+                    yield break;
+
+                default:
+                    throw new NotImplementedException($"Boolean expression contained an unhandled number of childnodes ({node.ChildNodes.Count})");
+            }
+        }
+
+        private IEnumerable<QOperand> EmitArray(QOperand CurrentOp)
+        {
+            var node = CurrentOp.ObjectNode;
+            var CurrentFunction = CurrentOp.CurrentFunction;
+            var Context = CurrentOp.Context;
+
+            yield return new QOperand(CurrentFunction, node.ChildNodes[1], 0);
+            yield return new QOperand(CurrentFunction, node.ChildNodes[0], Context);
+            CurrentFunction.AddOp(HasContext(Context, ScriptContext.IsRef) ? ScriptOpCode.EvalArrayRef : ScriptOpCode.EvalArray);
+        }
+
+        private bool HasContext(uint context, ScriptContext desired)
+        {
+            return (context & (uint)desired) > 0;
+        }
+
+        private void EmitOptionalParameters(T7ScriptExport CurrentFunction, ParseTreeNodeList Params, bool IsCustomInject)
+        {
+            foreach (var node in Params)
+            {
+                if (node.ChildNodes[0].Term.Name != "setOptionalParam")
+                    continue;
+
+                var optional = node.ChildNodes[0];
+                string pname = optional.ChildNodes[0].FindTokenAndGetText().ToLowerInvariant();
+
+                AddEvalLocal(CurrentFunction, pname, false);
+                CurrentFunction.AddOp(ScriptOpCode.IsDefined);
+
+                var __jmp = CurrentFunction.AddJump(ScriptOpCode.JumpOnTrue);
+
+                Push(CurrentFunction, optional.ChildNodes[2], 0);
+                IterateStack(IsCustomInject);
+
+                AddEvalLocal(CurrentFunction, pname, true);
+                CurrentFunction.AddOp(ScriptOpCode.SetVariableField);
+
+                __jmp.After = CurrentFunction.Locals.GetEndOfChain();
+            }
+        }
+
+        private void Push(QOperand op)
+        {
+            ScriptOperands.Push(op);
+        }
+
+        private void Push(T7ScriptExport CurrentFunction, ParseTreeNode node, uint Context)
+        {
+            ScriptOperands.Push(new QOperand(CurrentFunction, node, Context));
+        }
+
+        private void PushObject(object o)
+        {
+            ScriptOperands.Push(new QOperand(null, o, 0));
+        }
+
+
+        private void AddEvalLocal(T7ScriptExport CurrentFunction, string pname, bool IsRef, bool HasWaittillContext = false)
+        {
+            uint phash = Script.ScriptHash(pname);
+            (CurrentFunction as T7ScriptExport).AddEvalLocal(pname, phash, IsRef, HasWaittillContext);
+        }
+
+        private IEnumerable<string> CollectLocalVariables(T7ScriptExport CurrentFunction, ParseTreeNode node, bool AllowIDCollection)
+        {
+            Stack<ParseTreeNode> Remaining = new Stack<ParseTreeNode>();
+            Remaining.Push(node);
+
+            while (Remaining.Count > 0)
+            {
+                node = Remaining.Pop();
+
+                foreach (var childNode in node.ChildNodes)
+                {
+                    switch (childNode.Term.Name)
+                    {
+                        case "identifier":
+                            if (AllowIDCollection)
+                                yield return childNode.FindTokenAndGetText().ToLowerInvariant();
+                            break;
+
+                        case "setVariableField":
+                            if (childNode.ChildNodes[0].ChildNodes[0].Term.Name.Contains("identifier"))
+                            {
+                                yield return childNode.FindTokenAndGetText().ToLowerInvariant();
+                            }
+                            break;
+
+                        case "foreachSingle":
+                        case "foreachDouble":
+                            //This is needed for nested loops, These are temps values to help the compiler (needed)
+
+                            var first = (Helpers.BogsArrayKeys + (++temporaryIdentifier).ToString(System.Globalization.CultureInfo.InvariantCulture)).ToLowerInvariant(); //Array Keys
+                            var second = (Helpers.BogsArrayIndex + (++temporaryIdentifier).ToString(System.Globalization.CultureInfo.InvariantCulture)).ToLowerInvariant(); //Index
+
+                            CurrentFunction.PushFEPair(new KeyValuePair<string, string>(first, second));
+
+                            yield return first;
+                            yield return second;
+
+                            if (childNode.Term.Name == "foreachDouble")
+                                yield return childNode.ChildNodes[childNode.ChildNodes.FindIndex(e => e.Term.Name.ToLowerInvariant() == "key")].FindTokenAndGetText().ToLowerInvariant();
+                            yield return childNode.ChildNodes[childNode.ChildNodes.FindIndex(e => e.Term.Name.ToLowerInvariant() == "value")].FindTokenAndGetText().ToLowerInvariant();
+                            break;
+
+                        case "switchStatement":
+
+                            var key = (Helpers.BogsArrayKeys + (++temporaryIdentifier).ToString(System.Globalization.CultureInfo.InvariantCulture)).ToLowerInvariant();
+
+                            CurrentFunction.PushSwitchKey(key);
+
+                            yield return key;
+
+                            break;
+
+                        case "callFrame":
+                            if (childNode.ChildNodes[0].ChildNodes[0].FindTokenAndGetText() == "waittill")
+                            {
+                                var _params = childNode.ChildNodes[0].ChildNodes[1].ChildNodes[0].ChildNodes;
+                                for (int i = 1; i < _params.Count; i++)
+                                {
+                                    foreach (string s in CollectLocalVariables(CurrentFunction, _params[i], true))
+                                        yield return s;
+                                }
+                            }
+                            break;
+                    }
+                    Remaining.Push(childNode);
+                }
+            }
+            yield break;
+        }
+
+        private void AddLocal(T7ScriptExport CurrentFunction, string LocalName)
+        {
+            (CurrentFunction as T7ScriptExport).Locals.AddLocal(T7().ScriptHash(LocalName));
+        }
+
+        private T7ScriptExport CreateFunction(ParseTreeNode functionNode, string FunctionName)
+        {
+            return T7().Exports.Add(FunctionMetadata[FunctionName].FunctionHash, FunctionMetadata[FunctionName].NamespaceHash, FunctionMetadata[FunctionName].NumParams);
+        }
+
+        private string NormalizeUsing(string include)
+        {
+            include = include.ToLowerInvariant();
+            return include;
+        }
+
+        private void SetNamespace()
+        {
+            if (_tree.Root.ChildNodes[0].ChildNodes.Count > 0)
+            {
+                var directive = _tree.Root.ChildNodes[0].ChildNodes[0].ChildNodes.Find(x => x.ChildNodes[0].Term.Name.ToLowerInvariant() == "namespace");
+                if (directive != null)
+                    ScriptNamespace = Script.ScriptHash(directive.ChildNodes[0].ChildNodes[1].FindTokenAndGetText().ToLowerInvariant());
+            }
+        }
+
+        private struct ScriptFunctionMetaData
+        {
+            public uint FunctionHash;
+            public uint NamespaceHash;
+            public string FunctionName;
+            public string NamespaceName;
+            public byte NumParams;
+            public byte Flags;
+        }
+
+        private class QOperand
+        {
+            public readonly bool IsParseNode;
+            public object ObjectValue { private set; get; }
+            public ParseTreeNode ObjectNode
+            {
+                get
+                {
+                    return ObjectValue as ParseTreeNode;
+                }
+            }
+
+            private IEnumerable<QOperand> __operandsList;
+            public IEnumerable<QOperand> SetOperands
+            {
+                set
+                {
+                    __operandsList = value;
+                    GetOperands = __operandsList.GetEnumerator();
+                }
+            }
+
+            public IEnumerator<QOperand> GetOperands { get; private set; }
+
+            public readonly T7ScriptExport CurrentFunction;
+            public readonly uint Context;
+
+            public QOperand(T7ScriptExport export, object Value, uint context)
+            {
+                if (Value is ParseTreeNode)
+                    IsParseNode = true;
+
+                ObjectValue = Value;
+                CurrentFunction = export;
+                Context = context;
+            }
+
+            public QOperand Replace(int index)
+            {
+                ObjectValue = ObjectNode.ChildNodes[index];
+
+                return this;
+            }
+        }
+    }
+}

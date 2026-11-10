@@ -2,75 +2,93 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Text;
-using TreyarchCompiler;
+using System.Runtime.Serialization.Json;
+using ApexCompiler.Core;
 
 namespace ApexCompiler
 {
     internal static class Program
     {
-        // A standalone compiler ONLY. Does not connect to or modify a running process or PS4.
         private static int Main(string[] args)
         {
-            if (args.Length != 2 || args[0] == "--help")
-            {
-                Console.WriteLine("APEX compiler-only | PS4 BO3 1.33 GSC");
-                Console.WriteLine("Usage: APEX.Compiler.exe <source-directory-or-file> <output.gscc>");
-                return args.Length == 1 && args[0] == "--help" ? 0 : 2;
-            }
-
+            bool json = args.Contains("--json");
+            var result = new CompilationResult();
             try
             {
-                var input = Path.GetFullPath(args[0]);
-                var output = Path.GetFullPath(args[1]);
-                if (!output.EndsWith(".gscc", StringComparison.OrdinalIgnoreCase))
-                    throw new ArgumentException("Output file must have a .gscc extension.");
-
-                var files = File.Exists(input) ? new[] { input } :
-                    Directory.Exists(input) ? Directory.GetFiles(input, "*.gsc", SearchOption.AllDirectories)
-                        .OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray() :
-                    throw new FileNotFoundException("Source directory/file not found: " + input);
-
-                files = files.Where(x => x.EndsWith(".gsc", StringComparison.OrdinalIgnoreCase)).ToArray();
-                if (files.Length == 0) throw new InvalidOperationException("No .gsc source files found.");
-
-                var source = new StringBuilder();
-                foreach (var file in files)
+                if (args.Length == 1 && args[0] == "--version")
                 {
-                    Console.WriteLine("Source: " + file);
-                    source.AppendLine(File.ReadAllText(file));
-                    source.AppendLine();
+                    Console.WriteLine(result.Version);
+                    return 0;
                 }
-
-                var preprocessor = new ConditionalBlocks();
-                preprocessor.LoadConditionalTokens(new List<string> { "BO3" });
-                var processed = preprocessor.ParseSource(source.ToString());
-                var result = Compiler.Compile(false, processed);
-                if (result == null || !string.IsNullOrEmpty(result.Error))
+                if (args.Length == 1 && args[0] == "--help") { Usage(); return 0; }
+                var paths = new List<string>();
+                var symbols = new List<string>();
+                bool check = false, positionalOnly = false;
+                for (int i = 0; i < args.Length; i++)
                 {
-                    Console.Error.WriteLine("Compilation failed: " + (result == null ? "No result" : result.Error));
-                    return 1;
+                    string arg = args[i];
+                    if (positionalOnly) paths.Add(arg);
+                    else if (arg == "--") positionalOnly = true;
+                    else if (arg == "--json") { }
+                    else if (arg == "--check") check = true;
+                    else if (arg == "--define" && i + 1 < args.Length) symbols.Add(args[++i]);
+                    else if (arg.StartsWith("--", StringComparison.Ordinal)) throw new ArgumentException("Unknown or incomplete option: " + arg);
+                    else paths.Add(arg);
                 }
-                if (result.CompiledScript == null || result.CompiledScript.Length < 0x50)
-                    throw new InvalidDataException("Compiler produced no valid output.");
-
-                // The PS4 BO3 script magic, byte for byte, little-endian.
-                byte[] magic = { 0x80, 0x47, 0x53, 0x43, 0x0D, 0x0A, 0x00, 0x1C };
-                if (!result.CompiledScript.Take(8).SequenceEqual(magic))
-                    throw new InvalidDataException("Output does not have expected PS4 BO3 script magic.");
-
-                var directory = Path.GetDirectoryName(output);
-                if (!Directory.Exists(directory)) Directory.CreateDirectory(directory);
-                File.WriteAllBytes(output, result.CompiledScript);
-                Console.WriteLine("Wrote " + output + " (" + result.CompiledScript.Length + " bytes)");
-                foreach (var warning in result.Warning ?? new List<string>()) Console.WriteLine("Warning: " + warning);
-                return 0;
+                if (paths.Count != (check ? 1 : 2)) throw new ArgumentException("Expected a source path" + (check ? "." : " and an output path."));
+                string output = check ? null : Path.GetFullPath(paths[1]);
+                if (output != null && !output.EndsWith(".gscc", StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("Output must have a .gscc extension.");
+                result = CompilationService.CompilePath(paths[0], symbols);
+                result.Output = output;
+                if (result.Success && !check)
+                {
+                    try { AtomicOutput.WriteAllBytes(output, result.CompiledScript); }
+                    catch (Exception ex)
+                    {
+                        result.Success = false;
+                        result.Diagnostics.Add(new Diagnostic { Code = "APEX003", File = output, Message = ex.Message });
+                    }
+                }
+                Print(result, json, check);
+                return result.Success ? 0 : 1;
+            }
+            catch (ArgumentException ex)
+            {
+                result.Diagnostics.Add(new Diagnostic { Code = "APEX000", Message = ex.Message });
+                Print(result, json, false);
+                if (!json) Usage();
+                return 2;
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine("Error: " + ex.Message);
+                result.Diagnostics.Add(new Diagnostic { Message = ex.Message });
+                Print(result, json, false);
                 return 1;
             }
+        }
+
+        private static void Print(CompilationResult result, bool json, bool check)
+        {
+            if (json)
+            {
+                using (var stream = new MemoryStream())
+                {
+                    new DataContractJsonSerializer(typeof(CompilationResult)).WriteObject(stream, result);
+                    Console.WriteLine(System.Text.Encoding.UTF8.GetString(stream.ToArray()));
+                }
+                return;
+            }
+            foreach (var source in result.Sources) Console.WriteLine("Source: " + source);
+            foreach (var diagnostic in result.Diagnostics) Console.Error.WriteLine(diagnostic);
+            if (result.Success) Console.WriteLine(check ? "Compilation and structural validation passed." : "Wrote " + result.Output + " (" + result.Bytes + " bytes)");
+        }
+
+        private static void Usage()
+        {
+            Console.WriteLine("APEX compiler | PS4 BO3 1.33 GSC");
+            Console.WriteLine("Usage: APEX.Compiler.exe [--json] [--define TOKEN] <source-directory-or-file> <output.gscc>");
+            Console.WriteLine("       APEX.Compiler.exe --check [--json] [--define TOKEN] <source-directory-or-file>");
+            Console.WriteLine("       APEX.Compiler.exe --version | --help");
         }
     }
 }

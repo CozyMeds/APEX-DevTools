@@ -15,3 +15,6 @@ artifacts/
 # Local machine settings and operating-system clutter
 .DS_Store
 Thumbs.db
+# Test results and local tooling
+**/TestResults/
+*.trx

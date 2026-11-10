@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net48;netstandard2.0</TargetFrameworks>
+    <AssemblyName>APEX.Compiler.Core</AssemblyName>
+    <RootNamespace>ApexCompiler.Core</RootNamespace>
+    <Description>PS4 Black Ops III 1.33 GSC compiler and output validation library.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Irony" Version="1.1.0" />
+    <None Update="apex_ps4_ops.bin" CopyToOutputDirectory="PreserveNewest" />
+    <InternalsVisibleTo Include="APEX.Compiler.Tests" />
+  </ItemGroup>
+</Project>

@@ -1,4 +1,4 @@
-﻿namespace APEX.Compiler.GUI
+namespace APEX.Compiler.GUI
 {
     partial class MainForm
     {
@@ -39,6 +39,7 @@
             this.pnlActionDivider = new System.Windows.Forms.Panel();
             this.pnlActions = new System.Windows.Forms.TableLayoutPanel();
             this.btnCompile = new System.Windows.Forms.Button();
+            this.btnCancel = new System.Windows.Forms.Button();
             this.btnOpenOutput = new System.Windows.Forms.Button();
             this.lblConsole = new System.Windows.Forms.Label();
             this.lblConsoleHint = new System.Windows.Forms.Label();
@@ -238,9 +239,10 @@
             this.pnlActionDivider.Size = new System.Drawing.Size(864, 1);
 
             this.pnlActions.Anchor = System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left | System.Windows.Forms.AnchorStyles.Right;
-            this.pnlActions.ColumnCount = 2;
-            this.pnlActions.ColumnStyles.Add(new System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 66F));
-            this.pnlActions.ColumnStyles.Add(new System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 34F));
+            this.pnlActions.ColumnCount = 3;
+            this.pnlActions.ColumnStyles.Add(new System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 45F));
+            this.pnlActions.ColumnStyles.Add(new System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 35F));
+            this.pnlActions.ColumnStyles.Add(new System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 20F));
             this.pnlActions.Location = new System.Drawing.Point(28, 392);
             this.pnlActions.Margin = new System.Windows.Forms.Padding(0);
             this.pnlActions.Name = "pnlActions";
@@ -249,6 +251,15 @@
             this.pnlActions.Size = new System.Drawing.Size(864, 46);
             this.pnlActions.Controls.Add(this.btnCompile, 0, 0);
             this.pnlActions.Controls.Add(this.btnOpenOutput, 1, 0);
+            this.pnlActions.Controls.Add(this.btnCancel, 2, 0);
+            this.btnCancel.Text = "CANCEL";
+            this.btnCancel.AccessibleName = "Cancel compilation";
+            this.btnCancel.Dock = System.Windows.Forms.DockStyle.Fill;
+            this.btnCancel.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
+            this.btnCancel.ForeColor = System.Drawing.Color.FromArgb(226, 179, 98);
+            this.btnCancel.Enabled = false;
+            this.btnCancel.TabIndex = 5;
+            this.btnCancel.Click += new System.EventHandler(this.btnCancel_Click);
 
             this.btnCompile.BackColor = System.Drawing.Color.FromArgb(7, 136, 185);
             this.btnCompile.Cursor = System.Windows.Forms.Cursors.Hand;
@@ -351,7 +362,7 @@
             this.lblVersion.Location = new System.Drawing.Point(677, 683);
             this.lblVersion.Name = "lblVersion";
             this.lblVersion.Size = new System.Drawing.Size(215, 22);
-            this.lblVersion.Text = "APEX COMPILER  ·  GUI v0.3";
+            this.lblVersion.Text = "APEX COMPILER";
             this.lblVersion.TextAlign = System.Drawing.ContentAlignment.MiddleRight;
 
             // Form.
@@ -425,6 +436,7 @@
         private System.Windows.Forms.Panel pnlActionDivider;
         private System.Windows.Forms.TableLayoutPanel pnlActions;
         private System.Windows.Forms.Button btnCompile;
+        private System.Windows.Forms.Button btnCancel;
         private System.Windows.Forms.Button btnOpenOutput;
         private System.Windows.Forms.Label lblConsole;
         private System.Windows.Forms.Label lblConsoleHint;

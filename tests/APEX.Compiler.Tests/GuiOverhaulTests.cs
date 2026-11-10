@@ -83,7 +83,7 @@ namespace ApexCompiler.Tests
         private static void Sources(string directory)
         {
             Directory.CreateDirectory(directory);
-            File.WriteAllText(Path.Combine(directory, "main.gsc"), "main(){helper();} helper(){return;}");
+            File.Copy(Path.Combine(Repository(), "samples", "Sample-APEX", "main.gsc"), Path.Combine(directory, "main.gsc"));
         }
 
         [Fact]
@@ -97,7 +97,7 @@ namespace ApexCompiler.Tests
                 WithForm(compiler, source, output, async form =>
                 {
                     // Hosted runners may initially constrain the window to a small desktop.
-                    form.ClientSize = new Size(1280, 860);
+                    form.ClientSize = new Size(1280, 820);
                     form.PerformLayout();
                     AssertResultTextVisible(form);
                     Capture(form, "gui-ready.png");

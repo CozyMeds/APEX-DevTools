@@ -33,7 +33,7 @@ namespace APEX.Compiler.GUI
             Font = Theme.Body;
             BackColor = Theme.Background;
             ForeColor = Theme.Text;
-            ClientSize = new Size(1280, 860);
+            ClientSize = new Size(1280, 820);
             MinimumSize = new Size(1000, 720);
             StartPosition = FormStartPosition.CenterScreen;
             Text = "APEX DevTools";
@@ -110,7 +110,7 @@ namespace APEX.Compiler.GUI
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 8));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 142));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 152));
             layout.Controls.Add(SectionTitle("Build configuration", Glyph.Settings), 0, 0);
             var compilerState = NewCard("compilerState", Theme.Input, new Padding(10, 6, 10, 6));
             compilerState.BorderColor = Theme.Divider;
@@ -128,22 +128,32 @@ namespace APEX.Compiler.GUI
             btnBrowseCompiler = Button("btnBrowseCompiler", "", Glyph.Folder, btnBrowseCompiler_Click, "Browse for compiler executable");
             btnBrowseSource = Button("btnBrowseSource", "", Glyph.Folder, btnBrowseSource_Click, "Browse for source directory");
             btnBrowseOutput = Button("btnBrowseOutput", "", Glyph.Folder, btnBrowseOutput_Click, "Choose GSCC output file");
-            var sourceViewport = new Panel { Name = "sourceViewport", Dock = DockStyle.Fill, AutoScroll = true, BackColor = Theme.Surface, Margin = new Padding(0), AutoScrollMinSize = new Size(0, 272) };
-            var fields = Grid(1, 3); fields.Dock = DockStyle.Top; fields.Height = 272;
-            fields.RowStyles.Add(new RowStyle(SizeType.Absolute, 78));
+            var sourceViewport = new Panel { Name = "sourceViewport", Dock = DockStyle.Fill, AutoScroll = true, BackColor = Theme.Surface, Margin = new Padding(0), AutoScrollMinSize = Size.Empty };
+            var fields = Grid(1, 3); fields.Dock = DockStyle.Top; fields.Height = 314;
             fields.RowStyles.Add(new RowStyle(SizeType.Absolute, 94));
-            fields.RowStyles.Add(new RowStyle(SizeType.Absolute, 100));
+            fields.RowStyles.Add(new RowStyle(SizeType.Absolute, 110));
+            fields.RowStyles.Add(new RowStyle(SizeType.Absolute, 110));
             fields.Controls.Add(PathField("Compiler executable", Glyph.Terminal, txtCompiler, btnBrowseCompiler, "", 0), 0, 0);
             fields.Controls.Add(PathField("Source directory", Glyph.Folder, txtSource, btnBrowseSource, "All .gsc files in this folder", 1), 0, 1);
             fields.Controls.Add(PathField("Output file", Glyph.File, txtOutput, btnBrowseOutput, "Previous output is preserved if a build fails.", 2), 0, 2);
-            sourceViewport.Controls.Add(fields); layout.Controls.Add(sourceViewport, 0, 3);
+            sourceViewport.Controls.Add(fields);
+            sourceViewport.SizeChanged += (sender, args) =>
+            {
+                float scale = sourceViewport.DeviceDpi / 96F;
+                bool compact = sourceViewport.ClientSize.Height < 314 * scale;
+                fields.Height = (int)((compact ? 210 : 314) * scale);
+                fields.RowStyles[0].Height = (compact ? 70 : 94) * scale;
+                fields.RowStyles[1].Height = (compact ? 70 : 110) * scale;
+                fields.RowStyles[2].Height = (compact ? 70 : 110) * scale;
+            };
+            layout.Controls.Add(sourceViewport, 0, 3);
             var actions = Grid(1, 3);
-            actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
+            actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
             actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
             actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
 
             btnCompile = Button("btnCompile", "Compile GSCC", Glyph.Play, btnCompile_Click, "Compile GSCC (F5)");
-            btnCompile.Primary = true; btnCompile.Font = new Font("Segoe UI Semibold", 11F); btnCompile.TabIndex = 3;
+            btnCompile.Primary = true; btnCompile.Font = new Font("Segoe UI Semibold", 12F); btnCompile.TabIndex = 3;
             btnCompile.Margin = new Padding(0, 4, 0, 6);
             actions.Controls.Add(btnCompile, 0, 0);
             var secondary = Grid(2, 1); secondary.TabIndex = 4;
@@ -205,7 +215,7 @@ namespace APEX.Compiler.GUI
             rtbLog = new RichTextBox
             {
                 Name = "rtbLog", Dock = DockStyle.Fill, BorderStyle = BorderStyle.None, ReadOnly = true, DetectUrls = false,
-                WordWrap = false, ScrollBars = RichTextBoxScrollBars.Both, BackColor = Theme.Console, ForeColor = Theme.Text,
+                WordWrap = true, ScrollBars = RichTextBoxScrollBars.Vertical, BackColor = Theme.Console, ForeColor = Theme.Text,
                 Font = Theme.Mono, AccessibleName = "Build output log", AccessibleDescription = "Timestamped compiler messages. Use the filters to show warnings or errors."
             };
             consoleCard.Controls.Add(rtbLog); layout.Controls.Add(consoleCard, 0, 2);

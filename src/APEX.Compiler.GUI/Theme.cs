@@ -19,12 +19,12 @@ namespace APEX.Compiler.GUI
         internal static readonly Color Green = Color.FromArgb(110, 232, 153);
         internal static readonly Color Amber = Color.FromArgb(241, 196, 105);
         internal static readonly Color Red = Color.FromArgb(255, 125, 136);
-        internal static readonly Font Body = new Font("Segoe UI", 10F);
-        internal static readonly Font Small = new Font("Segoe UI", 9F);
-        internal static readonly Font Label = new Font("Segoe UI Semibold", 10F);
-        internal static readonly Font Heading = new Font("Segoe UI Semibold", 14F);
+        internal static readonly Font Body = new Font("Segoe UI", 10.5F);
+        internal static readonly Font Small = new Font("Segoe UI", 9.5F);
+        internal static readonly Font Label = new Font("Segoe UI Semibold", 10.5F);
+        internal static readonly Font Heading = new Font("Segoe UI Semibold", 15F);
         internal static readonly Font Title = new Font("Segoe UI Semibold", 27F);
-        internal static readonly Font Mono = new Font("Consolas", 10F);
+        internal static readonly Font Mono = new Font("Consolas", 10.5F);
 
         internal static GraphicsPath Rounded(RectangleF bounds, float radius)
         {

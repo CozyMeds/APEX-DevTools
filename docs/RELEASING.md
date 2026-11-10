@@ -67,7 +67,7 @@ unit tests or a code refactor.
 ## Antivirus evidence and blocked downloads
 
 Windows builds update Microsoft Defender security intelligence and scan the runtime
-archives before package smoke tests and upload. Scan logs, engine/definition versions,
+archives and extracted payloads before package smoke tests and upload. Scan logs, engine/definition versions,
 SHA-256 file hashes and Authenticode status are included in the CI artifacts. An
 unavailable engine, stale definitions, detection, scan error or changed payload fails
 the scan step. Runtime ZIPs are uploaded only after all checks pass; failed builds

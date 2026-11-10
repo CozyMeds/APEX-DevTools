@@ -1,0 +1,71 @@
+name: Scan reported downloads
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/scan-downloads.yml'
+      - 'scripts/scan-release.ps1'
+  workflow_dispatch:
+    inputs:
+      artifact_id:
+        description: GitHub Actions artifact to inspect
+        default: '13757516912'
+        required: true
+      artifact_sha256:
+        description: Expected SHA-256 from the artifact metadata
+        default: '88f6b22335037b200be40669d159e35dfe1e3372a5ae6237c11cac3be8b4c8b8'
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  defender:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Download and hash-check the reported files without running them
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APEX_REPOSITORY: ${{ github.repository }}
+          APEX_ARTIFACT_ID: ${{ inputs.artifact_id || '13757516912' }}
+          APEX_ARTIFACT_SHA256: ${{ inputs.artifact_sha256 || '88f6b22335037b200be40669d159e35dfe1e3372a5ae6237c11cac3be8b4c8b8' }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($PSVersionTable.PSVersion -lt [version]'7.4') { throw 'PowerShell 7.4 or later is required for binary-native redirection.' }
+          if ($env:APEX_ARTIFACT_ID -notmatch '^\d+$' -or $env:APEX_ARTIFACT_SHA256 -notmatch '^[a-fA-F0-9]{64}$') { throw 'Invalid artifact ID or SHA-256.' }
+          New-Item -ItemType Directory -Force artifacts/download-review, artifacts/antivirus | Out-Null
+          # These first three ZIPs are byte-identical to the copies shared in chat.
+          # Also inspect the main-branch build and the selected Actions artifact.
+          $targets = @(
+            @{ id = '13756422734'; sha256 = '098d0a945555611f1d426ce3971803992f0a5e38599fc92e9307610a556ae392' },
+            @{ id = '13755489771'; sha256 = '48c3249d90168422e8259964df528ded09897fe480de165f58ca9212cdd25d7b' },
+            @{ id = '13756658612'; sha256 = 'c804b60a263ea2e76f7b006cdeba94830ad290050590e358d20f6d0ba27f6683' },
+            @{ id = '13757957702'; sha256 = 'de0d4b470f50cbc18c0df85ed6da4f841aade446a8561d4456d6948f119678cf' },
+            @{ id = $env:APEX_ARTIFACT_ID; sha256 = $env:APEX_ARTIFACT_SHA256 }
+          )
+          $targets | ConvertTo-Json | Set-Content artifacts/antivirus/reported-downloads.json
+          foreach ($target in $targets) {
+            $folder = Join-Path artifacts/download-review $target.id
+            New-Item -ItemType Directory -Force $folder | Out-Null
+            $archive = Join-Path $folder 'reported-artifact.zip'
+            gh api "repos/$env:APEX_REPOSITORY/actions/artifacts/$($target.id)/zip" > $archive
+            if ($LASTEXITCODE -ne 0) { throw "Could not download artifact $($target.id)." }
+            if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $target.sha256.ToLowerInvariant()) { throw "Artifact $($target.id) SHA-256 does not match the recorded GitHub digest." }
+            Expand-Archive $archive (Join-Path $folder 'contents')
+          }
+          $archives = @(Get-ChildItem artifacts/download-review -Recurse -Filter '*.zip' | Where-Object Name -ne 'reported-artifact.zip')
+          foreach ($zip in $archives) { Expand-Archive $zip.FullName ($zip.FullName + '.extracted') }
+      - name: Scan archives and extracted payloads with current Defender definitions
+        shell: pwsh
+        run: ./scripts/scan-release.ps1 -Path artifacts/download-review -ReportDirectory artifacts/antivirus
+      - name: Upload scan evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: download-security-report
+          path: artifacts/antivirus/
+          if-no-files-found: warn

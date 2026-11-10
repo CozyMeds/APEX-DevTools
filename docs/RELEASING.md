@@ -63,3 +63,26 @@ remove or redesign them only with relevant fixtures. Future editor integration c
 use the JSON result, and project manifests/exclusion rules can be added separately.
 The source's inherited rights status and PS4 compatibility cannot be resolved by
 unit tests or a code refactor.
+
+## Antivirus evidence and blocked downloads
+
+Windows builds update Microsoft Defender security intelligence and scan the runtime
+archives and extracted payloads before package smoke tests and upload. Scan logs, engine/definition versions,
+SHA-256 file hashes and Authenticode status are included in the CI artifacts. An
+unavailable engine, stale definitions, detection, scan error or changed payload fails
+the scan step. Runtime ZIPs are uploaded only after all checks pass; failed builds
+retain validation reports separately. Unsigned binaries are reported as unsigned;
+signing is not fabricated.
+
+`Scan reported downloads` verifies an existing Actions artifact against a supplied
+SHA-256, then scans archives and extracted payloads without executing them. It also
+checks the three earlier GUI artifacts that exactly match the ZIP copies shared in
+chat, plus the main-branch build. The recorded IDs/digests identify the downloads
+reported in November 2026; update the recorded targets and dispatch defaults for
+future investigations. Artifacts expire according to GitHub retention settings.
+
+A Defender scan does not establish that Google Safe Browsing approves the download,
+or guarantee that it is malware-free. Treat a Chrome dangerous-download block as an
+unresolved detection until investigated. Preserve exact hashes and URLs for publisher
+review; do not disable protections or rename/encrypt a package to evade the warning.
+See https://support.google.com/chrome/answer/6261569 for Google's publisher guidance.

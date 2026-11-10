@@ -96,6 +96,10 @@ namespace ApexCompiler.Tests
                 string compiler = Path.Combine(Repository(), "src", "APEX.Compiler", "bin", "Release", "net48", "APEX.Compiler.exe");
                 WithForm(compiler, source, output, async form =>
                 {
+                    // Hosted runners may initially constrain the window to a small desktop.
+                    form.ClientSize = new Size(1280, 860);
+                    form.PerformLayout();
+                    AssertResultTextVisible(form);
                     Capture(form, "gui-ready.png");
                     Assert.Equal("Ready to compile", Field<Label>(form, "lblSummaryTitle").Text);
                     Assert.False(Field<Button>(form, "btnShowArtifact").Enabled);
@@ -111,6 +115,7 @@ namespace ApexCompiler.Tests
                     Assert.True(Field<Button>(form, "btnShowArtifact").Enabled);
                     Assert.False(Field<Button>(form, "btnCancel").Enabled);
                     Assert.DoesNotContain("APEX_", Field<RichTextBox>(form, "rtbLog").Text);
+                    AssertResultTextVisible(form);
                     Capture(form, "gui-success.png");
                     form.Size = form.MinimumSize;
                     form.PerformLayout();
@@ -121,6 +126,8 @@ namespace ApexCompiler.Tests
                     configuration.ScrollControlIntoView(compile);
                     Rectangle buttonBounds = configuration.RectangleToClient(compile.RectangleToScreen(compile.ClientRectangle));
                     Assert.True(configuration.ClientRectangle.Contains(buttonBounds), "Compile action must remain reachable at minimum window size.");
+                    AssertResultTextVisible(form);
+                    AssertActionVisible(form, "btnCancel");
                     Capture(form, "gui-minimum.png");
                 });
             }
@@ -209,6 +216,35 @@ namespace ApexCompiler.Tests
                     Capture(form, "gui-error.png");
                 });
             }
+        }
+
+        private static void AssertResultTextVisible(MainForm form)
+        {
+            foreach (string name in new[] { "lblVersion", "lblSummaryTitle", "lblSummaryDetails", "lblArtifactName", "lblArtifactSize" })
+            {
+                var label = Field<Label>(form, name);
+                Assert.True(label.Height >= TextRenderer.MeasureText(label.Text, label.Font).Height, name + " must have room for its text.");
+                var screen = label.RectangleToScreen(label.ClientRectangle);
+                for (Control parent = label.Parent; parent != null; parent = parent.Parent)
+                    Assert.True(parent.RectangleToScreen(parent.ClientRectangle).Contains(screen), name + " must not be clipped by " + parent.GetType().Name);
+            }
+            foreach (var label in Descendants(form).OfType<Label>().Where(l => l.Text == "Build output" || l.Text == "Build configuration"))
+                Assert.True(label.Height >= TextRenderer.MeasureText(label.Text, label.Font).Height, label.Text + " heading must remain visible.");
+        }
+        private static System.Collections.Generic.IEnumerable<Control> Descendants(Control parent)
+        {
+            foreach (Control child in parent.Controls)
+            {
+                yield return child;
+                foreach (var next in Descendants(child)) yield return next;
+            }
+        }
+        private static void AssertActionVisible(MainForm form, string name)
+        {
+            var button = Field<Button>(form, name);
+            var screen = button.RectangleToScreen(button.ClientRectangle);
+            for (Control parent = button.Parent; parent != null; parent = parent.Parent)
+                Assert.True(parent.RectangleToScreen(parent.ClientRectangle).Contains(screen), name + " must remain visible without scrolling.");
         }
 
         private static void Capture(MainForm form, string name)

@@ -34,7 +34,7 @@ namespace APEX.Compiler.GUI
             BackColor = Theme.Background;
             ForeColor = Theme.Text;
             ClientSize = new Size(1280, 860);
-            MinimumSize = new Size(1040, 760);
+            MinimumSize = new Size(1000, 720);
             StartPosition = FormStartPosition.CenterScreen;
             Text = "APEX DevTools";
             Name = "MainForm";
@@ -282,10 +282,18 @@ namespace APEX.Compiler.GUI
             return title;
         }
         private static CardPanel NewCard(string name, Color color, Padding padding) => new CardPanel { Name = name, BackColor = color, Dock = DockStyle.Fill, Padding = padding, Margin = new Padding(0) };
-        private static TableLayoutPanel Grid(int columns, int rows) => new TableLayoutPanel
+        private static TableLayoutPanel Grid(int columns, int rows)
         {
-            ColumnCount = columns, RowCount = rows, Dock = DockStyle.Fill, Margin = new Padding(0), Padding = new Padding(0), BackColor = Theme.Surface,
-            GrowStyle = TableLayoutPanelGrowStyle.FixedSize
-        };
+            var grid = new TableLayoutPanel
+            {
+                ColumnCount = columns, RowCount = rows, Dock = DockStyle.Fill, Margin = new Padding(0), Padding = new Padding(0), BackColor = Theme.Surface,
+                GrowStyle = TableLayoutPanelGrowStyle.FixedSize
+            };
+            // Single-row/column containers must fill the cell instead of measuring
+            // a nested Panel's default preferred size and clipping their children.
+            if (columns == 1) grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            if (rows == 1) grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            return grid;
+        }
     }
 }
